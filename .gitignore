@@ -27,3 +27,6 @@ Thumbs.db
 dist/
 build/
 *.zip
+
+# Local AstrBot test environment (source, venv, data, logs, caches)
+/.astrbot-test/
