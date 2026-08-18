@@ -1,0 +1,8 @@
+{
+  "exclusive_mode": {
+    "description": "独占模式",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，除 / 开头的 AstrBot 指令外，机器人收到的普通群消息都会由本插件接管，不再进入后续 LLM 或其他消息处理流程。适合仅用于开字母游戏的专用 Bot。默认关闭。"
+  }
+}
