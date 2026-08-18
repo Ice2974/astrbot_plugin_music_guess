@@ -11,6 +11,7 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import At, Plain
 from astrbot.api.star import Context, Star
 
 
@@ -43,6 +44,25 @@ class GameState:
     opened_chars: set[str] = field(default_factory=set)
 
 
+class AtBotFilter(filter.CustomFilter):
+    """仅当消息链中存在指向当前机器人自身的 At 消息段时通过。
+
+    @其他用户、@全体成员、仅回复机器人、仅 wake 前缀均不通过。
+    在 WakingCheck 的 handler filter 阶段生效：未 @机器人时
+    本插件 handler 不会进入 activated_handlers。
+    """
+
+    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        self_id = event.get_self_id()
+        if not self_id:
+            return False
+        self_id = str(self_id)
+        return any(
+            isinstance(seg, At) and str(seg.qq) == self_id
+            for seg in event.get_messages()
+        )
+
+
 class MusicGuessPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -57,22 +77,27 @@ class MusicGuessPlugin(Star):
         """插件初始化：加载本地曲库。曲库异常不会阻止插件本身加载。"""
         self._load_songs()
 
+    @filter.custom_filter(AtBotFilter)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL)
     async def on_group_message(self, event: AstrMessageEvent):
         """
-        处理 QQ 官方机器人群聊中的开字母游戏消息。
+        处理 QQ 官方机器人群聊中 @机器人 的开字母游戏消息。
 
-        - /xxx 始终保留给 AstrBot 内置/其他插件命令处理；
+        - 只有消息链中包含指向本机器人的 At 消息段时 handler 才会被激活
+          （见 AtBotFilter）；未 @机器人 的群消息不进入本插件；
+        - / 开头的 AstrBot 指令始终放行：WakingCheck 会在 handler 之前
+          剥离 message_str 的 wake 前缀（默认 "/"），因此用未被改写的
+          消息链 Plain 文本判断；
         - exclusive_mode=false（默认）：只处理明确的开字母命令，
-          无法识别的消息直接放行，不回复、不停止传播；
-        - exclusive_mode=true：其余普通群聊文本全部由本插件接管，
-          无法识别时给出玩法提示，并 stop_event()，避免进入 LLM。
+          @机器人 但无法识别的消息直接放行，不回复、不停止传播；
+        - exclusive_mode=true：@机器人 但无法识别的消息返回玩法提示，
+          并 stop_event()，避免进入 LLM。
         """
         text = self._normalize_input(event.message_str)
 
         # 保留 AstrBot 的 /help、/plugin 等系统/插件命令。
-        if text.startswith("/"):
+        if self._normalize_input(self._chain_plain_text(event)).startswith("/"):
             return
 
         group_id = event.get_group_id()
@@ -117,19 +142,16 @@ class MusicGuessPlugin(Star):
             )
             return self._open_character(group_id, candidate)
 
-        # 猜歌只在已有进行中的游戏时才认定为插件消息，
-        # 否则 "3 Credits" 这样可能是普通聊天的文本会被误拦截。
-        if group_id in self.games:
-            guess_match = GUESS_PATTERN.fullmatch(text)
-            if guess_match:
-                index = int(guess_match.group(1))
-                answer = guess_match.group(2)
-                return self._guess_song(group_id, index, answer)
+        guess_match = GUESS_PATTERN.fullmatch(text)
+        if guess_match:
+            index = int(guess_match.group(1))
+            answer = guess_match.group(2)
+            return self._guess_song(group_id, index, answer)
 
         return None
 
     def _dispatch_exclusive(self, group_id: str, text: str) -> str:
-        """exclusive_mode=true：所有非 / 普通群消息都由本插件接管。"""
+        """exclusive_mode=true：@机器人 的非 / 群消息都由本插件接管。"""
         reply = self._dispatch_public(group_id, text)
         if reply is not None:
             return reply
@@ -141,26 +163,28 @@ class MusicGuessPlugin(Star):
             # 游戏进行中：任何未识别普通文本都不要放到 LLM。
             return (
                 "无法识别这条游戏消息。\n\n"
+                "以下操作均需 @机器人：\n"
                 "开字符：开 A / 开 7 / 开 桜\n"
-                "猜歌曲：3 Credits（也可：曲 3 Credits）\n"
+                "猜歌曲：3 Credits（或 曲 3 Credits）\n"
                 "结束：结束开字母"
             )
 
         # 没有进行中的游戏：本插件也不承担 AI 对话。
         return (
             "本群当前没有进行中的开字母游戏。\n"
-            "发送「开字母」开始一局。\n"
+            "请 @机器人 后发送「开字母」开始一局。\n"
             "AstrBot 系统指令可使用 /help。"
         )
 
     def _usage_message(self, group_id: str) -> str:
         if group_id in self.games:
             return (
+                "以下操作均需 @机器人：\n"
                 "开字符：开 A / 开 7 / 开 桜\n"
-                "猜歌曲：3 Credits（也可：曲 3 Credits）\n"
+                "猜歌曲：3 Credits（或 曲 3 Credits）\n"
                 "结束：结束开字母"
             )
-        return "发送「开字母」开始一局。AstrBot 系统指令可使用 /help。"
+        return "请 @机器人 后发送「开字母」开始一局。AstrBot 系统指令可使用 /help。"
 
     def _load_songs(self) -> None:
         """读取 songs.txt；出错时只记录友好错误，不抛出异常导致插件崩溃。"""
@@ -224,18 +248,19 @@ class MusicGuessPlugin(Star):
         return (
             "开字母开始！\n\n"
             f"{self._render_board(state)}\n\n"
+            "以下操作均需 @机器人：\n"
             "开字符：开 A / 开 7 / 开 桜\n"
-            "猜歌曲：3 Credits（也可：曲 3 Credits）\n"
+            "猜歌曲：3 Credits（或 曲 3 Credits）\n"
             "结束：结束开字母"
         )
 
     def _open_character(self, group_id: str, char: str) -> str:
         state = self.games.get(group_id)
         if state is None:
-            return "本群当前没有进行中的开字母游戏。发送「开字母」开始一局。"
+            return "本群当前没有进行中的开字母游戏。请 @机器人 后发送「开字母」开始一局。"
 
         if not self._is_openable_char(char):
-            return "一次只能开一个字母或数字，例如：开 A / 开 7 / 开 桜。"
+            return "一次只能开一个字母或数字，例如：@机器人 开 A / 开 7 / 开 桜。"
 
         key = char.casefold()
         display_char = char.upper() if char.isalpha() else char
@@ -295,6 +320,13 @@ class MusicGuessPlugin(Star):
     def _normalize_input(text: str) -> str:
         """用于指令解析：兼容常见全角字符，并去除首尾空白。"""
         return unicodedata.normalize("NFKC", text or "").strip()
+
+    @staticmethod
+    def _chain_plain_text(event: AstrMessageEvent) -> str:
+        """拼接消息链顶层 Plain 段文本；WakingCheck 不会改写消息链。"""
+        return "".join(
+            seg.text for seg in event.get_messages() if isinstance(seg, Plain)
+        )
 
     @staticmethod
     def _normalize_answer(text: str) -> str:
