@@ -79,7 +79,7 @@ class MusicGuessPlugin(Star):
 
     @filter.custom_filter(AtBotFilter)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
-    @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.QQOFFICIAL, priority=1)
     async def on_group_message(self, event: AstrMessageEvent):
         """
         处理 QQ 官方机器人群聊中 @机器人 的开字母游戏消息。
@@ -89,8 +89,12 @@ class MusicGuessPlugin(Star):
         - / 开头的 AstrBot 指令始终放行：WakingCheck 会在 handler 之前
           剥离 message_str 的 wake 前缀（默认 "/"），因此用未被改写的
           消息链 Plain 文本判断；
-        - exclusive_mode=false（默认）：只处理明确的开字母命令，
-          @机器人 但无法识别的消息直接放行，不回复、不停止传播；
+        - priority=1 让游戏进行中已被认领的消息先于默认优先级（0）的
+          其他插件处理；priority 必须声明在最底部的装饰器上，否则
+          AstrBot 注册时会被忽略；
+        - exclusive_mode=false（默认）：只认领「开字母」入口和进行中
+          游戏的开字符 / 猜歌 / 结束操作，其余 @机器人 消息直接放行，
+          不回复、不停止传播；
         - exclusive_mode=true：@机器人 但无法识别的消息返回玩法提示，
           并 stop_event()，避免进入 LLM。
         """
@@ -125,12 +129,17 @@ class MusicGuessPlugin(Star):
             yield event.plain_result(reply)
 
     def _dispatch_public(self, group_id: str, text: str) -> str | None:
-        """exclusive_mode=false：只处理明确的开字母命令；返回 None 表示放行。"""
+        """exclusive_mode=false：只认领「开字母」入口和进行中游戏的操作；返回 None 表示放行。"""
         if not text:
             return None
 
         if text == START_COMMAND:
             return self._start_game(group_id)
+
+        # 游戏未开始时，开字符 / 猜歌 / 结束等快捷格式不属于本插件，
+        # 放行给其他插件 / LLM，避免抢占编号选择等同类消息。
+        if group_id not in self.games:
+            return None
 
         if text in END_COMMANDS:
             return self._end_game(group_id)
