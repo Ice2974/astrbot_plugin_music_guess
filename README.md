@@ -158,37 +158,11 @@ group_id -> GameState
 
 这是当前版本的有意设计，不需要数据库。
 
-## 当前未实现
-
-- 曲名别名
-- 来源游戏字段
-- 同名歌曲区分
-- 排行榜 / 积分
-- 游戏状态持久化
-- 在线更新曲库
-- WebUI 游戏配置
-- 自定义每局歌曲数量
-- 模糊匹配
-
 ## 配置
 
 插件只有一个配置项，可在 AstrBot WebUI 的插件配置页面修改：
 
 - `exclusive_mode`（独占模式，默认 `false`）：开启后，除 `/` 开头的 AstrBot 指令外，普通群消息全部由本插件接管，不再进入后续 LLM 或其他消息处理流程，适合仅用于开字母游戏的专用 Bot。普通公开 Bot 推荐保持默认关闭。
-
-## 项目结构
-
-```text
-astrbot_plugin_music_guess/
-├── .gitignore
-├── LICENSE
-├── README.md
-├── SOURCES.md
-├── _conf_schema.json
-├── main.py
-├── metadata.yaml
-└── songs.txt
-```
 
 ## 数据与许可证
 
