@@ -137,7 +137,7 @@ class MusicGuessPlugin(Star):
             # 游戏进行中：任何未识别普通文本都不要放到 LLM。
             return (
                 "无法识别这条游戏消息。\n\n"
-                "开字符：开 A / 开 7\n"
+                "开字符：开 A / 开 7 / 开 桜\n"
                 "猜歌曲：3 Credits（也可：曲 3 Credits）\n"
                 "结束：结束开字母"
             )
@@ -152,7 +152,7 @@ class MusicGuessPlugin(Star):
     def _usage_message(self, group_id: str) -> str:
         if group_id in self.games:
             return (
-                "开字符：开 A / 开 7\n"
+                "开字符：开 A / 开 7 / 开 桜\n"
                 "猜歌曲：3 Credits（也可：曲 3 Credits）\n"
                 "结束：结束开字母"
             )
@@ -220,7 +220,7 @@ class MusicGuessPlugin(Star):
         return (
             "开字母开始！\n\n"
             f"{self._render_board(state)}\n\n"
-            "开字符：开 A / 开 7\n"
+            "开字符：开 A / 开 7 / 开 桜\n"
             "猜歌曲：3 Credits（也可：曲 3 Credits）\n"
             "结束：结束开字母"
         )
@@ -231,7 +231,7 @@ class MusicGuessPlugin(Star):
             return "本群当前没有进行中的开字母游戏。发送「开字母」开始一局。"
 
         if not self._is_openable_char(char):
-            return "一次只能开一个英文字母或数字，例如：开 A / 开 7。"
+            return "一次只能开一个字母或数字，例如：开 A / 开 7 / 开 桜。"
 
         key = char.casefold()
         display_char = char.upper() if char.isalpha() else char
@@ -243,7 +243,7 @@ class MusicGuessPlugin(Star):
 
         exists = any(
             any(
-                ch.isascii() and ch.isalnum() and ch.casefold() == key
+                self._is_secret_char(ch) and ch.casefold() == key
                 for ch in song.title
             )
             for song in state.songs
@@ -306,21 +306,24 @@ class MusicGuessPlugin(Star):
         return " ".join(normalized.split())
 
     @staticmethod
-    def _is_openable_char(text: str) -> bool:
-        return len(text) == 1 and text.isascii() and text.isalnum()
+    def _is_secret_char(ch: str) -> bool:
+        """参与遮罩和开字母的字符：所有 Unicode 字母（含英文、中文、日文），以及 ASCII 数字 0-9。"""
+        return ch.isalpha() or (ch.isascii() and ch.isdigit())
 
-    @staticmethod
-    def _mask_title(title: str, opened_chars: set[str]) -> str:
+    def _is_openable_char(self, text: str) -> bool:
+        return len(text) == 1 and self._is_secret_char(text)
+
+    def _mask_title(self, title: str, opened_chars: set[str]) -> str:
         result: list[str] = []
 
         for ch in title:
-            if ch.isascii() and ch.isalnum():
+            if self._is_secret_char(ch):
                 if ch.casefold() in opened_chars:
                     result.append(ch)
                 else:
                     result.append(MASK_CHAR)
             else:
-                # 空格、标点、符号，以及第一版暂不隐藏的非 ASCII 字符直接显示。
+                # 空格、标点、符号，以及非 ASCII 数字等其他字符直接显示。
                 result.append(ch)
 
         return "".join(result)
