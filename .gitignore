@@ -30,3 +30,6 @@ build/
 
 # Local AstrBot test environment (source, venv, data, logs, caches)
 /.astrbot-test/
+
+# AstrBot runtime data (regenerated when AstrBot runs with repo root as cwd)
+data/
