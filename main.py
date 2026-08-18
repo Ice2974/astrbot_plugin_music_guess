@@ -14,7 +14,6 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
 
-PLUGIN_VERSION = "0.2.0"
 SONGS_FILENAME = "songs.txt"
 GAME_SONG_COUNT = 8
 
@@ -25,8 +24,11 @@ MASK_CHAR = "•"
 START_COMMAND = "开字母"
 END_COMMANDS = {"结束开字母", "结束游戏"}
 
-OPEN_PATTERN = re.compile(r"^开\s+(.+?)\s*$")
-GUESS_PATTERN = re.compile(r"^(?:曲\s*)?([1-8])\s+(.+?)\s*$")
+# 开字符：空格后跟任意单个字符；ASCII 字母 / 数字允许紧凑格式（开A、开7）。
+# 中文等文字字符必须带空格，避免把「开心」这类普通词语误识别为开字符指令。
+OPEN_PATTERN = re.compile(r"^开(?:\s+(.+?)|([A-Za-z0-9]))\s*$")
+# 猜歌：编号与曲名之间允许空格、点号（与题板「1. 」样式一致）或顿号分隔。
+GUESS_PATTERN = re.compile(r"^(?:曲\s*)?([1-8])[\s.、]+(.+?)\s*$")
 
 
 @dataclass(slots=True)
@@ -110,7 +112,9 @@ class MusicGuessPlugin(Star):
 
         open_match = OPEN_PATTERN.fullmatch(text)
         if open_match:
-            candidate = self._normalize_input(open_match.group(1))
+            candidate = self._normalize_input(
+                open_match.group(1) or open_match.group(2)
+            )
             return self._open_character(group_id, candidate)
 
         # 猜歌只在已有进行中的游戏时才认定为插件消息，
@@ -300,9 +304,12 @@ class MusicGuessPlugin(Star):
         - 英文字母大小写不敏感
         - 首尾空白忽略
         - 连续空白折叠成一个空格
-        - 标点必须匹配
+        - 弯引号 ’ ‘ “ ” 视为对应直引号（手机输入法会自动转换）
+        - 其余标点必须匹配
         """
         normalized = unicodedata.normalize("NFKC", text or "").casefold()
+        for curly, straight in (("’", "'"), ("‘", "'"), ("“", '"'), ("”", '"')):
+            normalized = normalized.replace(curly, straight)
         return " ".join(normalized.split())
 
     @staticmethod
