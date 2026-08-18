@@ -4,8 +4,6 @@
 
 插件内部名：`astrbot_plugin_music_guess`
 
-当前版本：`0.2.2`
-
 ## 功能
 
 - 每局随机抽取 8 首歌曲
