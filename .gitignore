@@ -12,7 +12,12 @@ venv/
 
 # IDE / editor
 .vscode/
+.settings/
 .idea/
+.agents/
+.codex/
+.claude/
+.zcode/
 
 # OS
 .DS_Store
