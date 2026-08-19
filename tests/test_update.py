@@ -203,6 +203,18 @@ class UpdateSourceModeTests(UpdateTestCase):
             set(fetch.calls), {GITHUB_URLS["manifest"], GITEE_URLS["manifest"]}
         )
 
+    def test_unhashable_config_values_fall_back_to_auto(self):
+        # 手工编辑配置可能写出不可哈希值；必须在 __init__ 安全回退 auto，
+        # 不得抛 TypeError 导致插件加载失败。
+        for bad in ("bananas", None, 123, [], {}):
+            with self.subTest(value=bad):
+                plugin = main.MusicGuessPlugin(
+                    context=None, config={"songs_update_source": bad}
+                )
+                self.assertEqual(
+                    plugin.songs_update_source, main.UPDATE_SOURCE_AUTO
+                )
+
     def test_missing_data_dir_skips_update_and_uses_bundled(self):
         fetch = FakeFetch()
         plugin = self.make_plugin()
@@ -723,6 +735,40 @@ class MakeManifestToolTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             make_manifest_tool.generate(self.songs_path, self.manifest_path)
         self.assertFalse(self.manifest_path.exists())
+
+    def test_existing_invalid_manifest_errors_and_preserves_file(self):
+        # 模拟「原本代表高版本（v5）、后被误编辑损坏」：所有用例的
+        # sha256 都与当前 songs.txt 完全一致。结构非法必须报错退出，
+        # 不得误判为“内容未变化”，更不得当作首次生成把文件重置为 v1。
+        titles = make_titles(10)
+        self._write_songs(titles)
+        valid = json.loads(make_manifest_bytes(make_songs_bytes(titles), 5))
+        cases = {
+            "invalid_json": b"{not json",
+            "not_an_object": b"[1, 2, 3]",
+            "version_missing": {k: v for k, v in valid.items() if k != "version"},
+            "version_bool": {**valid, "version": True},
+            "version_zero": {**valid, "version": 0},
+            "song_count_missing": {
+                k: v for k, v in valid.items() if k != "song_count"
+            },
+            "song_count_bool": {**valid, "song_count": True},
+            "song_count_below_minimum": {**valid, "song_count": 7},
+            "sha_not_hex": {**valid, "sha256": "z" * 64},
+            "sha_uppercase_hex": {**valid, "sha256": valid["sha256"].upper()},
+        }
+        for name, payload in cases.items():
+            with self.subTest(case=name):
+                raw = (
+                    payload
+                    if isinstance(payload, bytes)
+                    else json.dumps(payload).encode("utf-8")
+                )
+                self.manifest_path.write_bytes(raw)
+                with self.assertRaises(SystemExit):
+                    make_manifest_tool.generate(self.songs_path, self.manifest_path)
+                # 原文件不得被覆盖（尤其不得被重置为 v1）。
+                self.assertEqual(self.manifest_path.read_bytes(), raw)
 
 
 if __name__ == "__main__":

@@ -146,7 +146,10 @@ World Vanquisher
 - 完全相同的重复行自动去重
 - 至少需要 8 首有效歌曲
 
-修改 `songs.txt` 后重载插件即可重新读取。
+曲库的修改分为两类场景：
+
+- **仓库维护者**：修改仓库中的 `songs.txt` 后，必须运行 `python tools/make_manifest.py` 更新 `manifest.json`（内容变化时自动递增 version），并把两个文件一并提交。只改 `songs.txt` 不更新 manifest 会导致新曲库无法通过远端校验，用户端不会更新到新内容。
+- **插件使用者手工维护本地曲库**：如果直接修改插件安装目录中的 `songs.txt`，建议将 `songs_update_source` 设为 `disabled`。仍需注意持久数据目录中已存在的有效高版本缓存会优先于自带曲库；如需强制使用本地修改后的 `songs.txt`，请删除曲库缓存目录中的缓存文件（`manifest.json` 与 `songs-*.txt`，位于 `data/plugin_data/astrbot_plugin_music_guess/`），不要删除 AstrBot 的其他数据。
 
 当前仓库自带的曲库是离线 fallback 曲库，用于远程曲库无法下载、本地缓存不可用等情况下保证插件仍可正常游戏。正式多音游曲库的数据来源和许可信息见 [`SOURCES.md`](SOURCES.md)。
 

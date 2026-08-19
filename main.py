@@ -276,10 +276,12 @@ class MusicGuessPlugin(Star):
             if config
             else DEFAULT_UPDATE_SOURCE
         )
-        # 旧版本配置或手工编辑产生的非法值一律按 auto 处理。
+        # 旧版本配置或手工编辑产生的非法值（含 list/dict 等不可哈希值）
+        # 一律按 auto 处理，不能在 __init__ 阶段抛异常导致插件加载失败。
         self.songs_update_source = (
             raw_source
-            if raw_source in VALID_UPDATE_SOURCES
+            if isinstance(raw_source, str)
+            and raw_source in VALID_UPDATE_SOURCES
             else DEFAULT_UPDATE_SOURCE
         )
         # AstrBot 插件数据目录（缓存位置），initialize() 中通过 StarTools 解析；

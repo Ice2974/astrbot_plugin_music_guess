@@ -8,9 +8,11 @@
   与远端 raw 提供的字节保持同一口径；
 - 曲目去重规则与 main.py 的 _parse_song_titles 保持一致（strip、跳过空行、
   完全相同的标题只保留一次）；
-- 仅当内容 sha256 与现有 manifest 不一致时才递增 version 并重写 manifest；
+- 仅当内容 sha256 与现有合法 manifest 不一致时才递增 version 并重写 manifest；
   内容未变化时不 bump、不重写文件，只输出提示；
-- 首次（无有效 manifest）从 version 1 开始。
+- manifest.json 不存在时视为首次生成，从 version 1 开始；
+- manifest.json 已存在但结构非法时报错退出：不覆盖原文件、不当作首次
+  生成、绝不重置为 v1，以维护 version 单调递增协议。
 
 用法：
     python tools/make_manifest.py
@@ -21,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -30,6 +33,9 @@ MANIFEST_PATH = REPO_ROOT / "manifest.json"
 
 # 与 main.py 的 GAME_SONG_COUNT 保持一致。
 GAME_SONG_COUNT = 8
+
+# 与 main.py 运行时 _validate_manifest 相同的 sha256 口径：64 位小写十六进制。
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
 def parse_song_titles(text: str) -> list[str]:
@@ -45,21 +51,47 @@ def parse_song_titles(text: str) -> list[str]:
     return songs
 
 
-def load_manifest(path: Path) -> dict | None:
-    """读取现有 manifest；结构非法时视为无有效 manifest（返回 None）。"""
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return None
+def _is_valid_manifest(obj: object) -> bool:
+    """与 main.py 运行时 _validate_manifest 一致的结构校验；未知字段忽略。"""
     if not isinstance(obj, dict):
-        return None
+        return False
     version = obj.get("version")
+    song_count = obj.get("song_count")
     sha256 = obj.get("sha256")
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-        return None
-    if not isinstance(sha256, str) or len(sha256) != 64:
-        return None
-    return obj
+        return False
+    if (
+        not isinstance(song_count, int)
+        or isinstance(song_count, bool)
+        or song_count < GAME_SONG_COUNT
+    ):
+        return False
+    if not isinstance(sha256, str) or not _SHA256_HEX.fullmatch(sha256):
+        return False
+    return True
+
+
+def load_manifest(path: Path) -> tuple[str, dict | None]:
+    """读取现有 manifest，区分三种情况。
+
+    返回 (状态, 解析结果)：
+    - "missing"：文件不存在（首次生成），结果为 None；
+    - "valid"：文件存在且结构完整合法，结果为解析后的 dict；
+    - "invalid"：文件存在但非法（不可读 / 坏 JSON / 字段不符），结果为 None。
+    """
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return "missing", None
+    except OSError:
+        return "invalid", None
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        return "invalid", None
+    if not _is_valid_manifest(obj):
+        return "invalid", None
+    return "valid", obj
 
 
 def generate(songs_path: Path, manifest_path: Path) -> str:
@@ -90,8 +122,16 @@ def generate(songs_path: Path, manifest_path: Path) -> str:
         )
 
     sha256 = hashlib.sha256(data).hexdigest()
-    existing = load_manifest(manifest_path)
-    if existing is not None and existing.get("sha256") == sha256:
+    state, existing = load_manifest(manifest_path)
+    if state == "invalid":
+        # 已存在的 manifest 非法：绝不当作首次生成（那会把 version 重置为
+        # v1，破坏单调递增协议），而是报错退出，保留原文件待人工修复。
+        raise SystemExit(
+            f"错误：{manifest_path} 已存在但结构非法，为避免重置 version "
+            "不会自动重新生成。请先人工修复（如 git checkout -- "
+            f"{manifest_path.name}）后重试。"
+        )
+    if state == "valid" and existing.get("sha256") == sha256:
         return (
             f"songs.txt 内容未变化（sha256={sha256[:12]}…），"
             f"manifest 保持 v{existing['version']} 未重写。"
