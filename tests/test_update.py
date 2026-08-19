@@ -736,6 +736,18 @@ class MakeManifestToolTests(unittest.TestCase):
             make_manifest_tool.generate(self.songs_path, self.manifest_path)
         self.assertFalse(self.manifest_path.exists())
 
+    def test_song_count_mismatch_with_matching_sha_errors(self):
+        # sha256 与当前 songs.txt 完全一致（结构合法），但 song_count 与
+        # 实际去重数量不符：manifest 与其引用的内容自相矛盾，
+        # 应报错退出且不得重写 manifest。
+        titles = make_titles(10)
+        self._write_songs(titles)
+        mismatch = make_manifest_bytes(make_songs_bytes(titles), 3, song_count=12)
+        self.manifest_path.write_bytes(mismatch)
+        with self.assertRaises(SystemExit):
+            make_manifest_tool.generate(self.songs_path, self.manifest_path)
+        self.assertEqual(self.manifest_path.read_bytes(), mismatch)
+
     def test_existing_invalid_manifest_errors_and_preserves_file(self):
         # 模拟「原本代表高版本（v5）、后被误编辑损坏」：所有用例的
         # sha256 都与当前 songs.txt 完全一致。结构非法必须报错退出，

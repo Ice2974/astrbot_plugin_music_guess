@@ -12,7 +12,9 @@
   内容未变化时不 bump、不重写文件，只输出提示；
 - manifest.json 不存在时视为首次生成，从 version 1 开始；
 - manifest.json 已存在但结构非法时报错退出：不覆盖原文件、不当作首次
-  生成、绝不重置为 v1，以维护 version 单调递增协议。
+  生成、绝不重置为 v1，以维护 version 单调递增协议；
+- manifest.json 合法且 sha256 与当前 songs.txt 一致、但 song_count 与
+  实际有效歌曲数不符时，同样报错退出且不重写（内容自相矛盾）。
 
 用法：
     python tools/make_manifest.py
@@ -132,6 +134,15 @@ def generate(songs_path: Path, manifest_path: Path) -> str:
             f"{manifest_path.name}）后重试。"
         )
     if state == "valid" and existing.get("sha256") == sha256:
+        if existing.get("song_count") != len(titles):
+            # sha256 相同意味着内容字节完全一致，去重数量必然相同；
+            # 数值不符说明 manifest 与其引用的内容自相矛盾，报错退出
+            # 且不重写，待人工核对修复。
+            raise SystemExit(
+                f"错误：{manifest_path} 的 song_count={existing.get('song_count')}"
+                f" 与 songs.txt 实际有效歌曲数 {len(titles)} 不一致"
+                "（sha256 相同）。请人工核对修复 manifest 后重试。"
+            )
         return (
             f"songs.txt 内容未变化（sha256={sha256[:12]}…），"
             f"manifest 保持 v{existing['version']} 未重写。"
