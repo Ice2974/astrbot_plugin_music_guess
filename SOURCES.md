@@ -173,6 +173,25 @@ songs.txt
 
 只有实际需要游戏筛选、别名、多语言标题、同名歌曲区分等功能时，才考虑升级为结构化曲库格式。
 
+## 曲库分发与自动更新
+
+`songs.txt` 通过以下渠道分发，内容完全一致，GitHub 为主上游：
+
+* GitHub 主仓库 raw：`https://raw.githubusercontent.com/Ice2974/astrbot_plugin_music_guess/main/songs.txt`
+* Gitee 镜像 raw：`https://gitee.com/Ice2974/astrbot_plugin_music_guess/raw/main/songs.txt`（GitHub → Gitee 单向同步）
+
+仓库根目录的 `manifest.json` 是曲库自动更新元数据（`version` / `song_count` / `sha256`），不属于歌曲数据，也不改变 `songs.txt` 一行一首的格式。
+
+manifest 维护流程：
+
+1. 修改 `songs.txt`；
+2. 运行 `python tools/make_manifest.py`：仅当内容 sha256 与现有 manifest 不一致时递增 version 并重写 manifest，内容未变化时不 bump、不重写，仅输出提示；首次（无有效 manifest）从 version 1 开始；
+3. 提交并推送 GitHub，等待 Gitee 同步。
+
+脚本只对当前工作树 `songs.txt` 的原始字节计算哈希（与远端 raw 提供的字节同口径），不调用 git。注意仓库换行标准为 LF：若本地工作树被转换为 CRLF，脚本会输出警告，此时哈希与远端实际内容会不一致，应先恢复 LF 再生成。
+
+通过上述渠道分发的内容与仓库内置 `songs.txt` 完全相同，其数据来源、整理规则与许可说明仍以上文各节为准；经 Gitee 镜像分发不改变任何来源的许可条件。
+
 ## 未来在线曲库
 
 未来远程自动更新曲库可能继续加入其他音乐游戏。

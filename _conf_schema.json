@@ -4,5 +4,13 @@
     "type": "bool",
     "default": false,
     "hint": "开启后，@机器人 但无法识别的消息会返回玩法提示并停止事件传播，不再进入 LLM 或其他插件；未 @机器人 的消息本插件完全不处理。适合仅用于开字母游戏的专用 Bot。默认关闭。"
+  },
+  "songs_update_source": {
+    "description": "曲库更新源",
+    "type": "string",
+    "options": ["auto", "github", "gitee", "disabled"],
+    "labels": ["自动选择更新源", "从 GitHub 更新", "从 Gitee 更新", "不更新"],
+    "default": "auto",
+    "hint": "插件加载时按所选源检查并更新曲库。「自动选择更新源」并发探测 GitHub 与 Gitee：优先版本较新的源；版本相同且内容一致时优先 Gitee，内容不一致时以 GitHub 为准。「从 GitHub 更新」/「从 Gitee 更新」只使用指定源，失败不切换另一源。「不更新」完全不发起网络请求。远程曲库会先通过 SHA-256 等完整校验再写入缓存；任何网络、镜像或校验失败都会在约 20 秒总预算内自动回退本地已有曲库，不影响游戏。修改后需重载插件生效。"
   }
 }

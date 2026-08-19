@@ -3,19 +3,27 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
+import os
 import random
 import re
+import ssl
 import unicodedata
+import urllib.request
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Plain
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context, Star, StarTools
 
 
 SONGS_FILENAME = "songs.txt"
+MANIFEST_FILENAME = "manifest.json"
 GAME_SONG_COUNT = 8
 
 # QQ 官方客户端会把连续半角 * 按 Markdown 语法解释。
@@ -30,6 +38,48 @@ END_COMMANDS = {"结束开字母", "结束游戏"}
 OPEN_PATTERN = re.compile(r"^开(?:\s+(.+?)|([A-Za-z0-9]))\s*$")
 # 猜歌：编号与曲名之间允许空格、点号（与题板「1. 」样式一致）或顿号分隔。
 GUESS_PATTERN = re.compile(r"^(?:曲\s*)?([1-8])[\s.、]+(.+?)\s*$")
+
+# ---- 曲库自动更新 ----
+# 曲库更新源配置（songs_update_source）的内部取值。
+UPDATE_SOURCE_AUTO = "auto"
+UPDATE_SOURCE_GITHUB = "github"
+UPDATE_SOURCE_GITEE = "gitee"
+UPDATE_SOURCE_DISABLED = "disabled"
+VALID_UPDATE_SOURCES = frozenset(
+    {
+        UPDATE_SOURCE_AUTO,
+        UPDATE_SOURCE_GITHUB,
+        UPDATE_SOURCE_GITEE,
+        UPDATE_SOURCE_DISABLED,
+    }
+)
+DEFAULT_UPDATE_SOURCE = UPDATE_SOURCE_AUTO
+
+# GitHub 为曲库主上游，Gitee 为国内镜像（GitHub → Gitee 单向同步）。
+# Gitee raw 地址已人工验证会 302 到 raw.giteeusercontent.com，urllib 自动跟随。
+UPDATE_SOURCES: dict[str, dict[str, str]] = {
+    "github": {
+        "manifest": "https://raw.githubusercontent.com/Ice2974/astrbot_plugin_music_guess/main/manifest.json",
+        "songs": "https://raw.githubusercontent.com/Ice2974/astrbot_plugin_music_guess/main/songs.txt",
+    },
+    "gitee": {
+        "manifest": "https://gitee.com/Ice2974/astrbot_plugin_music_guess/raw/main/manifest.json",
+        "songs": "https://gitee.com/Ice2974/astrbot_plugin_music_guess/raw/main/songs.txt",
+    },
+}
+
+# 整个远程更新流程的全局时间预算；探测 / 下载阶段各有分项超时并按剩余预算钳制，
+# 外层 asyncio.wait_for(总预算) 作硬兜底，避免不可达源拖慢插件初始化。
+UPDATE_TOTAL_BUDGET_S = 20.0
+UPDATE_PROBE_TIMEOUT_S = 6.0
+UPDATE_DOWNLOAD_TIMEOUT_S = 12.0
+UPDATE_THREAD_GRACE_S = 2.0
+UPDATE_MAX_BYTES = 8 * 1024 * 1024
+UPDATE_USER_AGENT = (
+    "astrbot_plugin_music_guess (+https://github.com/Ice2974/astrbot_plugin_music_guess)"
+)
+
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(slots=True)
@@ -63,6 +113,155 @@ class AtBotFilter(filter.CustomFilter):
         )
 
 
+# ---------------------------------------------------------------------------
+# 曲库自动更新：模块级纯函数（解析 / 校验 / 下载 / 原子写 / 候选排序）
+# ---------------------------------------------------------------------------
+
+
+def _parse_song_titles(text: str) -> list[str]:
+    """按行解析曲名：strip、跳过空行、完全相同的标题只保留一次（保持首次出现顺序）。"""
+    songs: list[str] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        title = line.strip()
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        songs.append(title)
+    return songs
+
+
+def _validate_manifest(obj: object) -> dict | None:
+    """manifest.json 结构校验，不合法返回 None；未知字段忽略以保持向前兼容。"""
+    if not isinstance(obj, dict):
+        return None
+    version = obj.get("version")
+    song_count = obj.get("song_count")
+    sha256 = obj.get("sha256")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        return None
+    if (
+        not isinstance(song_count, int)
+        or isinstance(song_count, bool)
+        or song_count < GAME_SONG_COUNT
+    ):
+        return None
+    if not isinstance(sha256, str) or not _SHA256_HEX.fullmatch(sha256):
+        return None
+    return {"version": version, "song_count": song_count, "sha256": sha256}
+
+
+def _validate_library_pair(
+    manifest_bytes: bytes, songs_bytes: bytes
+) -> tuple[int, list[str]] | None:
+    """整组校验 manifest + songs：结构、大小、SHA-256、编码、去重数量。
+
+    任一环节失败返回 None；只有整组有效，其 manifest version 才参与版本比较。
+    """
+    try:
+        info = _validate_manifest(json.loads(manifest_bytes.decode("utf-8-sig")))
+    except ValueError:  # 含 UnicodeDecodeError / json.JSONDecodeError
+        return None
+    if info is None:
+        return None
+    if len(songs_bytes) > UPDATE_MAX_BYTES:
+        return None
+    if hashlib.sha256(songs_bytes).hexdigest() != info["sha256"]:
+        return None
+    try:
+        titles = _parse_song_titles(songs_bytes.decode("utf-8-sig"))
+    except UnicodeDecodeError:
+        return None
+    if len(titles) < GAME_SONG_COUNT or len(titles) != info["song_count"]:
+        return None
+    return info["version"], titles
+
+
+def _blocking_http_get(url: str, timeout_s: float) -> bytes:
+    """阻塞式 GET（在工作线程中运行）；非 2xx、超时、超过大小上限都会抛异常。"""
+    request = urllib.request.Request(url, headers={"User-Agent": UPDATE_USER_AGENT})
+    with urllib.request.urlopen(
+        request, timeout=timeout_s, context=ssl.create_default_context()
+    ) as response:
+        data = response.read(UPDATE_MAX_BYTES + 1)
+    if len(data) > UPDATE_MAX_BYTES:
+        raise ValueError(f"响应超过 {UPDATE_MAX_BYTES} 字节上限")
+    return data
+
+
+async def _http_download(url: str, timeout_s: float) -> bytes:
+    """异步下载：阻塞请求放到工作线程执行，外层 wait_for 兜底。
+
+    取消时工作线程至多残留到 socket 超时，不会阻塞事件循环。
+    """
+    return await asyncio.wait_for(
+        asyncio.to_thread(_blocking_http_get, url, timeout_s),
+        timeout=timeout_s + UPDATE_THREAD_GRACE_S,
+    )
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """同目录临时文件 + os.replace，保证单个文件的原子替换。
+
+    跨文件没有事务保证；曲库缓存依赖 manifest.json 作为唯一提交点
+    （见 _commit_cache）。
+    """
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        tmp_path.write_bytes(data)
+        os.replace(tmp_path, path)
+    finally:
+        # replace 成功时 tmp 已不存在；失败时清理残留。
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+def _cache_files(data_dir: Path) -> list[Path]:
+    """列出数据目录中的曲库缓存文件（manifest、songs-*.txt 与 *.tmp 残留）。"""
+    return [
+        item
+        for item in data_dir.iterdir()
+        if item.is_file()
+        and (
+            item.name == MANIFEST_FILENAME
+            or (item.name.startswith("songs-") and item.name.endswith(".txt"))
+            or item.name.endswith(".tmp")
+        )
+    ]
+
+
+def _sort_update_candidates(entries: list[dict]) -> list[dict]:
+    """候选源排序：version 降序。
+
+    - 同 version 且内容（sha256）相同：优先 Gitee（国内可达性）；
+    - 同 version 但 sha256 不一致：警告并以 GitHub 主上游为准。
+    """
+    ordered = sorted(entries, key=lambda entry: entry["version"], reverse=True)
+    result: list[dict] = []
+    index = 0
+    while index < len(ordered):
+        end = index
+        while (
+            end < len(ordered) and ordered[end]["version"] == ordered[index]["version"]
+        ):
+            end += 1
+        group = ordered[index:end]
+        if len(group) > 1:
+            if len({entry["sha256"] for entry in group}) == 1:
+                group.sort(key=lambda entry: entry["source"] != "gitee")
+            else:
+                logger.warning(
+                    "music_guess 更新源 manifest 同 version 但 sha256 不一致，以 GitHub 主上游为准"
+                )
+                group.sort(key=lambda entry: entry["source"] != "github")
+        result.extend(group)
+        index = end
+    return result
+
+
 class MusicGuessPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -72,10 +271,31 @@ class MusicGuessPlugin(Star):
         self.exclusive_mode = (
             bool(config.get("exclusive_mode", False)) if config else False
         )
+        raw_source = (
+            config.get("songs_update_source", DEFAULT_UPDATE_SOURCE)
+            if config
+            else DEFAULT_UPDATE_SOURCE
+        )
+        # 旧版本配置或手工编辑产生的非法值一律按 auto 处理。
+        self.songs_update_source = (
+            raw_source
+            if raw_source in VALID_UPDATE_SOURCES
+            else DEFAULT_UPDATE_SOURCE
+        )
+        # AstrBot 插件数据目录（缓存位置），initialize() 中通过 StarTools 解析；
+        # None 表示不可用：跳过远程更新，仅使用插件自带曲库。
+        self._data_dir: Path | None = None
 
     async def initialize(self):
-        """插件初始化：加载本地曲库。曲库异常不会阻止插件本身加载。"""
+        """插件初始化：先加载本地有效曲库，再在限时预算内尝试远程曲库更新。
+
+        本地曲库在更新开始前就已可用；曲库、缓存或网络的任何异常
+        都不会阻止插件本身加载和游戏。
+        """
+        self._data_dir = self._resolve_data_dir()
         self._load_songs()
+        if await self._check_song_updates():
+            self._load_songs()
 
     @filter.custom_filter(AtBotFilter)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
@@ -195,47 +415,322 @@ class MusicGuessPlugin(Star):
             )
         return "请 @机器人 后发送「开字母」开始一局。AstrBot 系统指令可使用 /help。"
 
-    def _load_songs(self) -> None:
-        """读取 songs.txt；出错时只记录友好错误，不抛出异常导致插件崩溃。"""
-        path = Path(__file__).resolve().with_name(SONGS_FILENAME)
+    # ---- 曲库加载与远程更新 ----
 
+    def _resolve_data_dir(self) -> Path | None:
+        """获取 AstrBot 官方插件数据目录；失败时返回 None（跳过更新，仅用本地曲库）。"""
         try:
-            if not path.is_file():
-                self.song_pool = []
-                self.song_load_error = f"曲库文件不存在：{SONGS_FILENAME}"
-                logger.warning(self.song_load_error)
-                return
+            return StarTools.get_data_dir("astrbot_plugin_music_guess")
+        except Exception:
+            logger.warning("music_guess 无法获取插件数据目录，跳过曲库自动更新")
+            return None
 
-            # utf-8-sig 同时兼容普通 UTF-8 和带 BOM 的 UTF-8 文本。
-            lines = path.read_text(encoding="utf-8-sig").splitlines()
-        except (OSError, UnicodeError) as exc:
+    def _load_songs(self) -> None:
+        """加载本地曲库：缓存 pair 与插件自带曲库按 manifest version 择高，并列取缓存。
+
+        缓存无效时成组清理（自愈）并回退插件自带曲库；自带曲库永不删除。
+        对外只更新 song_pool / song_load_error，不抛出异常。
+        """
+        cache_pair = self._read_cache_pair()
+        if cache_pair is None:
+            self._discard_cache()
+
+        bundled_version, bundled_titles = self._read_bundled_library()
+        bundled_ok = (
+            bundled_titles is not None and len(bundled_titles) >= GAME_SONG_COUNT
+        )
+
+        if bundled_ok and (cache_pair is None or bundled_version > cache_pair[0]):
+            source, version, titles = "自带", bundled_version, bundled_titles
+        elif cache_pair is not None:
+            source, version, titles = "缓存", cache_pair[0], cache_pair[1]
+        else:
             self.song_pool = []
-            self.song_load_error = f"曲库文件读取失败：{exc}"
+            if bundled_titles is None:
+                self.song_load_error = f"曲库文件不存在：{SONGS_FILENAME}"
+            else:
+                self.song_load_error = (
+                    f"曲库有效歌曲只有 {len(bundled_titles)} 首，"
+                    f"至少需要 {GAME_SONG_COUNT} 首。"
+                )
             logger.warning(self.song_load_error)
             return
 
-        songs: list[str] = []
-        seen: set[str] = set()
-
-        for line in lines:
-            title = line.strip()
-            if not title or title in seen:
-                continue
-            seen.add(title)
-            songs.append(title)
-
-        self.song_pool = songs
-
-        if len(songs) < GAME_SONG_COUNT:
-            self.song_load_error = (
-                f"曲库有效歌曲只有 {len(songs)} 首，"
-                f"至少需要 {GAME_SONG_COUNT} 首。"
-            )
-            logger.warning(self.song_load_error)
-            return
-
+        self.song_pool = titles
         self.song_load_error = None
-        logger.info(f"music_guess 曲库加载完成：{len(songs)} 首")
+        logger.info(f"music_guess 曲库加载完成：{source} v{version}，{len(titles)} 首")
+
+    def _read_cache_pair(self) -> tuple[int, list[str]] | None:
+        """读取并整组校验缓存（manifest.json + songs-<sha256>.txt）；无效返回 None。"""
+        data_dir = self._data_dir
+        if data_dir is None:
+            return None
+        try:
+            manifest_bytes = (data_dir / MANIFEST_FILENAME).read_bytes()
+            info = _validate_manifest(json.loads(manifest_bytes.decode("utf-8-sig")))
+            if info is None:
+                return None
+            songs_path = data_dir / f"songs-{info['sha256']}.txt"
+            if not songs_path.is_file():
+                return None
+            return _validate_library_pair(manifest_bytes, songs_path.read_bytes())
+        except OSError:
+            return None
+        except ValueError:  # 含 UnicodeDecodeError / json.JSONDecodeError
+            return None
+
+    def _read_bundled_library(self) -> tuple[int, list[str] | None]:
+        """读取插件自带曲库。
+
+        manifest + songs 整组有效时返回其 version 与曲名；manifest 缺失或整组
+        无效时 version 按 0 处理，但 songs.txt 本身仍可作为最后手段使用。
+        """
+        plugin_dir = Path(__file__).resolve().parent
+        try:
+            songs_bytes = (plugin_dir / SONGS_FILENAME).read_bytes()
+        except OSError:
+            return 0, None
+        try:
+            pair = _validate_library_pair(
+                (plugin_dir / MANIFEST_FILENAME).read_bytes(), songs_bytes
+            )
+            if pair is not None:
+                return pair[0], pair[1]
+        except OSError:
+            pass
+        except ValueError:
+            pass
+        try:
+            return 0, _parse_song_titles(songs_bytes.decode("utf-8-sig"))
+        except UnicodeDecodeError:
+            return 0, None
+
+    def _discard_cache(self) -> None:
+        """best-effort 丢弃无效缓存残留；插件自带曲库不受影响。"""
+        data_dir = self._data_dir
+        if data_dir is None:
+            return
+        try:
+            leftovers = _cache_files(data_dir)
+        except OSError:
+            return
+        if not leftovers:
+            return
+        logger.warning("music_guess 本地曲库缓存无效，清理残留并回退插件自带曲库")
+        for item in leftovers:
+            try:
+                item.unlink()
+            except OSError:
+                pass
+
+    def _local_library_version(self) -> int:
+        """当前本地有效曲库版本：缓存 pair 与自带 pair 的较大值，无效按 0。"""
+        versions = [0]
+        cache_pair = self._read_cache_pair()
+        if cache_pair is not None:
+            versions.append(cache_pair[0])
+        bundled_version, _ = self._read_bundled_library()
+        versions.append(bundled_version)
+        return max(versions)
+
+    async def _check_song_updates(
+        self,
+        fetch: Callable[[str, float], Awaitable[bytes]] | None = None,
+        total_budget_s: float = UPDATE_TOTAL_BUDGET_S,
+        probe_timeout_s: float = UPDATE_PROBE_TIMEOUT_S,
+        download_timeout_s: float = UPDATE_DOWNLOAD_TIMEOUT_S,
+    ) -> bool:
+        """按配置尝试远程曲库更新；成功提交缓存返回 True。
+
+        所有网络、镜像、校验或远程文件异常都只记录日志并返回 False，
+        绝不抛出异常，也不影响已加载的本地曲库。
+        """
+        if fetch is None:
+            fetch = _http_download
+        if self._data_dir is None or self.songs_update_source == UPDATE_SOURCE_DISABLED:
+            return False
+        try:
+            return await asyncio.wait_for(
+                self._run_update(fetch, total_budget_s, probe_timeout_s, download_timeout_s),
+                timeout=total_budget_s,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"music_guess 曲库更新超出 {total_budget_s:.0f}s 总预算，继续使用本地曲库"
+            )
+            return False
+        except Exception:
+            logger.exception("music_guess 曲库更新发生未预期异常，继续使用本地曲库")
+            return False
+
+    async def _run_update(
+        self,
+        fetch: Callable[[str, float], Awaitable[bytes]],
+        total_budget_s: float,
+        probe_timeout_s: float,
+        download_timeout_s: float,
+    ) -> bool:
+        """更新主流程：探测 manifest → 择优 → 与本地版本比较 → 下载校验 → 提交缓存。"""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + total_budget_s
+
+        def remaining() -> float:
+            return deadline - loop.time()
+
+        source_names = (
+            ["github", "gitee"]
+            if self.songs_update_source == UPDATE_SOURCE_AUTO
+            else [self.songs_update_source]
+        )
+
+        # 阶段一：manifest 探测（auto 模式并发，受整体探测窗口约束，
+        # 不会因为一个源挂起而拖满另一个源的超时时间）。
+        probe_window = min(probe_timeout_s, remaining())
+        entries = await self._probe_manifests(fetch, source_names, probe_window)
+        if not entries:
+            logger.warning("music_guess 未取得任何有效的远程 manifest，继续使用本地曲库")
+            return False
+
+        candidates = _sort_update_candidates(entries)
+        local_version = self._local_library_version()
+        best = candidates[0]
+        if best["version"] <= local_version:
+            logger.info(
+                f"music_guess 曲库已是最新（本地 v{local_version}，"
+                f"远端最高 v{best['version']}）"
+            )
+            return False
+
+        # 阶段二：按序下载并整组校验；auto 模式允许跨到下一个已取得
+        # 有效 manifest 的源，github / gitee 单源模式禁止跨源。
+        problems: list[str] = []
+        for entry in candidates:
+            if entry["version"] <= local_version:
+                # 候选按 version 降序，其后都不会比本地新，不降级。
+                break
+            budget_left = remaining()
+            if budget_left <= 0:
+                problems.append("更新预算耗尽")
+                break
+            timeout = min(download_timeout_s, budget_left)
+            try:
+                songs_bytes = await fetch(entry["urls"]["songs"], timeout)
+                pair = _validate_library_pair(entry["manifest_bytes"], songs_bytes)
+            except Exception as exc:
+                problems.append(f"{entry['source']} songs.txt 下载失败：{exc}")
+                logger.warning(f"music_guess 曲库更新：{problems[-1]}")
+                continue
+            if pair is None:
+                problems.append(f"{entry['source']} songs.txt 校验未通过")
+                logger.warning(f"music_guess 曲库更新：{problems[-1]}")
+                continue
+            if self._commit_cache(entry["manifest_bytes"], songs_bytes, entry["sha256"]):
+                logger.info(
+                    f"music_guess 曲库已更新：{entry['source']} v{pair[0]}，"
+                    f"{len(pair[1])} 首"
+                )
+                return True
+            problems.append(f"{entry['source']} 缓存写入失败")
+            logger.warning(f"music_guess 曲库更新：{problems[-1]}")
+
+        logger.warning(
+            f"music_guess 曲库更新失败（{'; '.join(problems)}），继续使用本地曲库"
+        )
+        return False
+
+    async def _probe_manifests(
+        self,
+        fetch: Callable[[str, float], Awaitable[bytes]],
+        source_names: list[str],
+        window_s: float,
+    ) -> list[dict]:
+        """在探测窗口内并发获取并校验各源 manifest；窗口结束取消未完成任务。"""
+        if window_s <= 0:
+            return []
+        tasks = [
+            asyncio.ensure_future(self._fetch_manifest(fetch, name, window_s))
+            for name in source_names
+        ]
+        done, pending = await asyncio.wait(tasks, timeout=window_s)
+        for task in pending:
+            task.cancel()
+        if pending:
+            # 等待取消完成，避免任务销毁警告。
+            await asyncio.gather(*pending, return_exceptions=True)
+        entries = []
+        for task in done:
+            try:
+                entry = task.result()
+            except Exception:
+                entry = None
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+    async def _fetch_manifest(
+        self,
+        fetch: Callable[[str, float], Awaitable[bytes]],
+        source_name: str,
+        timeout_s: float,
+    ) -> dict | None:
+        """获取并校验单个源的 manifest；失败只记日志并返回 None。"""
+        urls = UPDATE_SOURCES[source_name]
+        try:
+            manifest_bytes = await fetch(urls["manifest"], timeout_s)
+            obj = json.loads(manifest_bytes.decode("utf-8-sig"))
+        except Exception as exc:
+            logger.warning(f"music_guess {source_name} manifest 获取失败：{exc}")
+            return None
+        info = _validate_manifest(obj)
+        if info is None:
+            logger.warning(f"music_guess {source_name} manifest 校验未通过")
+            return None
+        return {
+            "source": source_name,
+            "urls": urls,
+            "manifest_bytes": manifest_bytes,
+            **info,
+        }
+
+    def _commit_cache(
+        self, manifest_bytes: bytes, songs_bytes: bytes, sha256_hex: str
+    ) -> bool:
+        """内容寻址提交缓存：先写 songs-<sha256>.txt，最后原子替换 manifest.json。
+
+        manifest.json 是唯一提交点：替换成功之前，旧 manifest 始终指向旧的
+        有效歌曲文件，因此歌曲写入失败、manifest 替换失败、甚至更新流程在两步
+        之间被超时取消，都不会破坏旧有效缓存。两个 os.replace 各自仅保证
+        单文件原子，不构成跨文件事务。
+        """
+        data_dir = self._data_dir
+        if data_dir is None:
+            return False
+        try:
+            _atomic_write(data_dir / f"songs-{sha256_hex}.txt", songs_bytes)
+            _atomic_write(data_dir / MANIFEST_FILENAME, manifest_bytes)
+        except Exception:
+            logger.exception("music_guess 曲库缓存写入失败")
+            return False
+        self._cleanup_orphan_cache(sha256_hex)
+        return True
+
+    def _cleanup_orphan_cache(self, current_sha256: str) -> None:
+        """提交成功后 best-effort 清理未被 manifest 引用的缓存文件。"""
+        data_dir = self._data_dir
+        if data_dir is None:
+            return
+        keep = f"songs-{current_sha256}.txt"
+        try:
+            leftovers = _cache_files(data_dir)
+        except OSError:
+            return
+        for item in leftovers:
+            if item.name in (MANIFEST_FILENAME, keep):
+                continue
+            try:
+                item.unlink()
+            except OSError:
+                pass
 
     def _start_game(self, group_id: str) -> str:
         if group_id in self.games:
