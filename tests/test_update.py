@@ -44,6 +44,21 @@ BUNDLED_TITLES = main._parse_song_titles(
 )
 
 
+def _bundled_version() -> int:
+    """读取仓库 bundled manifest 的实际版本；测试场景版本全部相对它构造，
+    曲库 bump 之后测试依然成立。"""
+    manifest = json.loads(
+        (REPO_ROOT / main.MANIFEST_FILENAME).read_text(encoding="utf-8-sig")
+    )
+    return manifest["version"]
+
+
+# 场景版本：与 bundled 持平 / 更新一版 / 更新两版。
+V_SAME = _bundled_version()
+V_NEW = V_SAME + 1
+V_NEWEST = V_SAME + 2
+
+
 def _load_manifest_tool():
     spec = importlib.util.spec_from_file_location(
         "make_manifest_tool", REPO_ROOT / "tools" / "make_manifest.py"
@@ -158,10 +173,10 @@ class UpdateSourceModeTests(UpdateTestCase):
         github_songs = make_songs_bytes(make_titles(10, "GH"))
         gitee_songs = make_songs_bytes(make_titles(10, "Mirror"))
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, 2))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, V_NEW))
         fetch.route(GITHUB_URLS["songs"], OSError("connection reset"))
         # Gitee 路由完好：若实现错误地跨源，更新会成功。
-        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, 2))
+        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, V_NEW))
         fetch.route(GITEE_URLS["songs"], gitee_songs)
 
         plugin = self.make_plugin({"songs_update_source": "github"})
@@ -177,9 +192,9 @@ class UpdateSourceModeTests(UpdateTestCase):
         github_songs = make_songs_bytes(make_titles(10, "GH"))
         gitee_songs = make_songs_bytes(make_titles(10, "Mirror"))
         fetch = FakeFetch()
-        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, 2))
+        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, V_NEW))
         fetch.route(GITEE_URLS["songs"], OSError("connection reset"))
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, 2))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, V_NEW))
         fetch.route(GITHUB_URLS["songs"], github_songs)
 
         plugin = self.make_plugin({"songs_update_source": "gitee"})
@@ -192,12 +207,12 @@ class UpdateSourceModeTests(UpdateTestCase):
     def test_invalid_config_value_behaves_like_auto(self):
         remote_songs = make_songs_bytes(make_titles(10, "Remote"))
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(remote_songs, 1))
-        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(remote_songs, 1))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(remote_songs, V_SAME))
+        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(remote_songs, V_SAME))
 
         plugin = self.make_plugin({"songs_update_source": "bananas"})
         self.assertEqual(plugin.songs_update_source, main.UPDATE_SOURCE_AUTO)
-        # 远端 v1 与自带 v1 相同 → 已是最新，但仍探测了两个源。
+        # 远端与自带同版本 → 已是最新，但仍探测了两个源。
         self.assertFalse(self.run_update(plugin, fetch))
         self.assertEqual(
             set(fetch.calls), {GITHUB_URLS["manifest"], GITEE_URLS["manifest"]}
@@ -243,9 +258,9 @@ class AutoSelectionTests(UpdateTestCase):
         github_songs = make_songs_bytes(make_titles(10, "GH"))
         gitee_songs = make_songs_bytes(make_titles(11, "Gitee"))
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, 2))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, V_NEW))
         fetch.route(GITHUB_URLS["songs"], github_songs)
-        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, 3))
+        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, V_NEWEST))
         fetch.route(GITEE_URLS["songs"], gitee_songs)
 
         plugin = self.make_plugin()
@@ -255,7 +270,7 @@ class AutoSelectionTests(UpdateTestCase):
 
     def test_auto_same_version_same_content_prefers_gitee(self):
         songs = make_songs_bytes(make_titles(10, "Same"))
-        manifest = make_manifest_bytes(songs, 2)
+        manifest = make_manifest_bytes(songs, V_NEW)
         fetch = FakeFetch()
         fetch.route(GITHUB_URLS["manifest"], manifest)
         fetch.route(GITHUB_URLS["songs"], songs)
@@ -272,10 +287,10 @@ class AutoSelectionTests(UpdateTestCase):
         gitee_songs = make_songs_bytes(make_titles(10, "Gitee"))
         fetch = FakeFetch()
         fetch.route(
-            GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, 3)
+            GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, V_NEW)
         )
         fetch.route(GITHUB_URLS["songs"], github_songs)
-        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, 3))
+        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, V_NEW))
         fetch.route(GITEE_URLS["songs"], gitee_songs)
 
         plugin = self.make_plugin()
@@ -294,7 +309,7 @@ class AutoSelectionTests(UpdateTestCase):
             with self.subTest(source=good["manifest"]):
                 data_dir = self._fresh_data_dir()
                 fetch = FakeFetch()
-                fetch.route(good["manifest"], make_manifest_bytes(songs, 2))
+                fetch.route(good["manifest"], make_manifest_bytes(songs, V_NEW))
                 fetch.route(good["songs"], songs)
                 fetch.route(bad["manifest"], OSError("unreachable"))
 
@@ -315,9 +330,9 @@ class AutoSelectionTests(UpdateTestCase):
         github_songs = make_songs_bytes(make_titles(10, "GH"))
         gitee_songs = make_songs_bytes(make_titles(9, "Gitee"))
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, 3))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, V_NEWEST))
         fetch.route(GITHUB_URLS["songs"], OSError("download failed"))
-        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, 2))
+        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, V_NEW))
         fetch.route(GITEE_URLS["songs"], gitee_songs)
 
         plugin = self.make_plugin()
@@ -331,12 +346,12 @@ class AutoSelectionTests(UpdateTestCase):
         github_songs = make_songs_bytes(make_titles(10, "GH"))
         gitee_songs = make_songs_bytes(make_titles(9, "Gitee"))
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, 3))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(github_songs, V_NEWEST))
         # 返回内容与 manifest hash 不一致 → 校验失败 → 回退 Gitee。
         fetch.route(
             GITHUB_URLS["songs"], make_songs_bytes(make_titles(10, "Tampered"))
         )
-        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, 2))
+        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, V_NEW))
         fetch.route(GITEE_URLS["songs"], gitee_songs)
 
         plugin = self.make_plugin()
@@ -347,12 +362,12 @@ class AutoSelectionTests(UpdateTestCase):
     def test_auto_probe_window_bounds_hanging_source(self):
         gitee_songs = make_songs_bytes(make_titles(10, "Gitee"))
         github_manifest = make_manifest_bytes(
-            make_songs_bytes(make_titles(10, "GH")), 2
+            make_songs_bytes(make_titles(10, "GH")), V_NEW
         )
         fetch = FakeFetch()
         # GitHub manifest 挂起 5s，探测窗口只有 0.5s：不得等待 GitHub 完整超时。
         fetch.route(GITHUB_URLS["manifest"], github_manifest, delay=5.0)
-        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, 2))
+        fetch.route(GITEE_URLS["manifest"], make_manifest_bytes(gitee_songs, V_NEW))
         fetch.route(GITEE_URLS["songs"], gitee_songs)
 
         plugin = self.make_plugin()
@@ -374,7 +389,7 @@ class AutoSelectionTests(UpdateTestCase):
     def test_global_budget_caps_hanging_download(self):
         songs = make_songs_bytes(make_titles(10, "Slow"))
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(songs, 2))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(songs, V_NEW))
         fetch.route(GITHUB_URLS["songs"], songs, delay=5.0)
 
         plugin = self.make_plugin({"songs_update_source": "github"})
@@ -393,10 +408,10 @@ class AutoSelectionTests(UpdateTestCase):
         self.assertEqual(self.cache_files(), [])
 
     def test_no_download_when_remote_not_newer(self):
-        # 自带曲库为 v1，远端也是 v1：应判定已是最新，不下载也不生成缓存。
+        # 自带曲库与远端同版本：应判定已是最新，不下载也不生成缓存。
         remote_songs = make_songs_bytes(make_titles(12, "Remote"))
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(remote_songs, 1))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(remote_songs, V_SAME))
         fetch.route(GITHUB_URLS["songs"], remote_songs)
 
         plugin = self.make_plugin({"songs_update_source": "github"})
@@ -422,7 +437,7 @@ class ValidationTests(UpdateTestCase):
 
     def test_manifest_invalid_fields_rejected(self):
         songs = make_songs_bytes(make_titles(10))
-        good = json.loads(make_manifest_bytes(songs, 2))
+        good = json.loads(make_manifest_bytes(songs, V_NEW))
         cases = {
             "missing_version": {k: v for k, v in good.items() if k != "version"},
             "missing_song_count": {
@@ -450,7 +465,7 @@ class ValidationTests(UpdateTestCase):
     def test_songs_hash_mismatch_rejected(self):
         expected = make_songs_bytes(make_titles(10, "Expected"))
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(expected, 2))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(expected, V_NEW))
         fetch.route(
             GITHUB_URLS["songs"], make_songs_bytes(make_titles(10, "Actual"))
         )
@@ -460,7 +475,7 @@ class ValidationTests(UpdateTestCase):
     def test_songs_utf8_with_bom_accepted(self):
         songs = b"\xef\xbb\xbf" + make_songs_bytes(make_titles(10, "Bom"))
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(songs, 2))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(songs, V_NEW))
         fetch.route(GITHUB_URLS["songs"], songs)
 
         plugin = self._make_plugin()
@@ -474,7 +489,7 @@ class ValidationTests(UpdateTestCase):
         # 歌曲字节无法解码：song_count 需显式给出（自动计算依赖解码）。
         fetch.route(
             GITHUB_URLS["manifest"],
-            make_manifest_bytes(songs, 2, song_count=10),
+            make_manifest_bytes(songs, V_NEW, song_count=10),
         )
         fetch.route(GITHUB_URLS["songs"], songs)
         self.assertFalse(self.run_update(self._make_plugin(), fetch))
@@ -494,7 +509,7 @@ class ValidationTests(UpdateTestCase):
                 fetch = FakeFetch()
                 fetch.route(
                     GITHUB_URLS["manifest"],
-                    make_manifest_bytes(songs, 2, song_count=count),
+                    make_manifest_bytes(songs, V_NEW, song_count=count),
                 )
                 fetch.route(GITHUB_URLS["songs"], songs)
                 self.assertFalse(self.run_update(self._make_plugin(data_dir), fetch))
@@ -506,7 +521,7 @@ class CacheLoadTests(UpdateTestCase):
 
     def test_valid_cache_preferred_over_bundled_on_tie(self):
         titles = make_titles(10, "Cache")
-        write_valid_cache(self.data_dir, titles, version=1)  # 与自带 v1 并列
+        write_valid_cache(self.data_dir, titles, version=V_SAME)  # 与 bundled 并列
 
         plugin = self.make_plugin()
         plugin._load_songs()
@@ -514,7 +529,7 @@ class CacheLoadTests(UpdateTestCase):
 
     def test_cache_higher_version_preferred(self):
         titles = make_titles(10, "Cache")
-        write_valid_cache(self.data_dir, titles, version=5)
+        write_valid_cache(self.data_dir, titles, version=V_NEW)
 
         plugin = self.make_plugin()
         plugin._load_songs()
@@ -530,7 +545,7 @@ class CacheLoadTests(UpdateTestCase):
 
     def test_cache_pair_hash_mismatch_discarded_and_bundled_used(self):
         real_songs = make_songs_bytes(make_titles(10, "Real"))
-        manifest = make_manifest_bytes(real_songs, 2)
+        manifest = make_manifest_bytes(real_songs, V_NEW)
         (self.data_dir / main.MANIFEST_FILENAME).write_bytes(manifest)
         # 歌曲文件字节与 manifest hash 不一致（例如半文件 / 新旧错位）。
         (self.data_dir / f"songs-{sha256_hex(real_songs)}.txt").write_bytes(
@@ -546,7 +561,7 @@ class CacheLoadTests(UpdateTestCase):
     def test_cache_manifest_without_songs_file_discarded(self):
         ghost_songs = make_songs_bytes(make_titles(10, "Ghost"))
         (self.data_dir / main.MANIFEST_FILENAME).write_bytes(
-            make_manifest_bytes(ghost_songs, 2)
+            make_manifest_bytes(ghost_songs, V_NEW)
         )
 
         plugin = self.make_plugin()
@@ -556,7 +571,7 @@ class CacheLoadTests(UpdateTestCase):
 
     def test_update_failure_keeps_existing_cache(self):
         titles = make_titles(10, "Cache")
-        manifest_bytes = write_valid_cache(self.data_dir, titles, version=3)
+        manifest_bytes = write_valid_cache(self.data_dir, titles, version=V_NEWEST)
 
         fetch = FakeFetch()  # 两个 manifest 都失败
         plugin = self.make_plugin()
@@ -572,7 +587,7 @@ class CacheLoadTests(UpdateTestCase):
         new_titles = make_titles(10, "New")
         songs = make_songs_bytes(new_titles)
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(songs, 2))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(songs, V_NEW))
         fetch.route(GITHUB_URLS["songs"], songs)
 
         plugin = self.make_plugin()
@@ -592,11 +607,11 @@ class CommitPointTests(UpdateTestCase):
 
     def test_manifest_commit_failure_preserves_old_cache(self):
         old_manifest = write_valid_cache(
-            self.data_dir, make_titles(10, "Old"), version=2
+            self.data_dir, make_titles(10, "Old"), version=V_NEW
         )
         new_songs = make_songs_bytes(make_titles(11, "New"))
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(new_songs, 3))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(new_songs, V_NEWEST))
         fetch.route(GITHUB_URLS["songs"], new_songs)
 
         real_atomic_write = main._atomic_write
@@ -625,7 +640,7 @@ class CommitPointTests(UpdateTestCase):
         )
 
     def test_orphan_cleaned_after_next_successful_update(self):
-        write_valid_cache(self.data_dir, make_titles(10, "Old"), version=2)
+        write_valid_cache(self.data_dir, make_titles(10, "Old"), version=V_NEW)
         orphan_songs = make_songs_bytes(make_titles(9, "Orphan"))
         (self.data_dir / f"songs-{sha256_hex(orphan_songs)}.txt").write_bytes(
             orphan_songs
@@ -633,7 +648,7 @@ class CommitPointTests(UpdateTestCase):
 
         new_songs = make_songs_bytes(make_titles(11, "New"))
         fetch = FakeFetch()
-        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(new_songs, 4))
+        fetch.route(GITHUB_URLS["manifest"], make_manifest_bytes(new_songs, V_NEWEST))
         fetch.route(GITHUB_URLS["songs"], new_songs)
 
         plugin = self.make_plugin()
@@ -657,9 +672,9 @@ class InitializeWiringTests(UpdateTestCase):
             main._http_download = original_http
 
     def test_initialize_updates_and_reloads(self):
-        write_valid_cache(self.data_dir, make_titles(10, "Old"), version=2)
+        write_valid_cache(self.data_dir, make_titles(10, "Old"), version=V_NEW)
         new_songs = make_songs_bytes(make_titles(12, "New"))
-        manifest = make_manifest_bytes(new_songs, 3)
+        manifest = make_manifest_bytes(new_songs, V_NEWEST)
         fetch = FakeFetch()
         fetch.route(GITHUB_URLS["manifest"], manifest)
         fetch.route(GITEE_URLS["manifest"], manifest)
