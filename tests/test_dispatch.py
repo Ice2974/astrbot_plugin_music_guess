@@ -318,6 +318,34 @@ class DispatchTests(unittest.TestCase):
         self.assertIn("全部歌曲都猜出来了", reply)
         self.assertNotIn("A", self.plugin.games)
 
+    def test_guess_accepts_width_case_quote_and_whitespace_variants(self):
+        cases = [
+            ("BIG SHOT", "BIGSHOT"),
+            ("BIGSHOT", "BIG SHOT"),
+            ("Heartache", "Heart ache"),
+            ("Heart ache", "Heartache"),
+            ("(Song)", "（ｓＯＮＧ）"),
+            ("AlphaBeta", "Alpha\t\u3000Beta"),
+            ("Lyrical ’94", "lyrical'94"),
+        ]
+        for title, answer in cases:
+            with self.subTest(title=title, answer=answer):
+                self.plugin.games["A"] = main.GameState(
+                    songs=[main.RoundSong(title=title)]
+                )
+                reply = self.plugin._guess_song("A", 1, answer)
+                self.assertIn("答对了", reply)
+
+    def test_guess_still_requires_other_punctuation(self):
+        self.plugin.games["A"] = main.GameState(
+            songs=[main.RoundSong(title="Alpha-Ray")]
+        )
+
+        reply = self.plugin._guess_song("A", 1, "Alpha Ray")
+
+        self.assertEqual(reply, "不对。")
+        self.assertFalse(self.plugin.games["A"].songs[0].guessed)
+
     # ---- 独占模式 ----
 
     def _make_exclusive_plugin(self):
@@ -462,6 +490,35 @@ class NormalizeAnswerTests(unittest.TestCase):
     def test_empty_and_none_are_safe(self):
         self.assertEqual(self.normalize(""), "")
         self.assertEqual(self.normalize(None), "")
+
+
+# ---- _normalize_guess_answer：仅猜歌忽略全部空白 ----
+
+
+class NormalizeGuessAnswerTests(unittest.TestCase):
+    normalize = staticmethod(main.MusicGuessPlugin._normalize_guess_answer)
+
+    def test_spaces_can_be_inserted_or_removed(self):
+        self.assertEqual(self.normalize("BIG SHOT"), self.normalize("BIGSHOT"))
+        self.assertEqual(self.normalize("Heartache"), self.normalize("Heart ache"))
+
+    def test_all_unicode_whitespace_is_ignored(self):
+        self.assertEqual(
+            self.normalize("Alpha\t\u3000Beta\nGamma"),
+            self.normalize("AlphaBetaGamma"),
+        )
+
+    def test_fullwidth_parentheses_match_halfwidth(self):
+        self.assertEqual(self.normalize("（Song）"), self.normalize("(Song)"))
+
+    def test_existing_case_and_quote_rules_are_preserved(self):
+        self.assertEqual(
+            self.normalize("Lyrical ’94"),
+            self.normalize("LYRICAL'94"),
+        )
+
+    def test_other_punctuation_must_match(self):
+        self.assertNotEqual(self.normalize("Alpha Ray"), self.normalize("Alpha-Ray"))
 
 
 # ---- _mask_title：遮罩规则 ----

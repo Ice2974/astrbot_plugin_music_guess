@@ -242,6 +242,22 @@ class LoadSongsTests(SongLibraryTestCase):
         self.assertNotIn("Alpha Ray", self.plugin.song_pool)
         self.assertNotIn("Lyrical ’94", self.plugin.song_pool)
 
+    def test_cross_library_dedup_keeps_spacing_variants(self):
+        self.write_library(
+            "phigros.txt",
+            ["BIG SHOT"] + _titles("PHI", 8),
+        )
+        self.write_library(
+            "arcaea.txt",
+            ["BIGSHOT"] + _titles("ARC", 8),
+        )
+
+        self.load(config={"enabled_libraries": ["phigros", "arcaea"]})
+
+        self.assertEqual(len(self.plugin.song_pool), 18)
+        self.assertIn("BIG SHOT", self.plugin.song_pool)
+        self.assertIn("BIGSHOT", self.plugin.song_pool)
+
     def test_merged_pool_below_minimum_reports_error(self):
         self.write_library("tiny.txt", _titles("T", 5))
         self.load(config={"enabled_libraries": ["tiny"]})

@@ -527,7 +527,9 @@ class MusicGuessPlugin(Star):
         if song.guessed:
             return f"第 {index} 首已经猜出来了：{song.title}"
 
-        if self._normalize_answer(answer) != self._normalize_answer(song.title):
+        if self._normalize_guess_answer(answer) != self._normalize_guess_answer(
+            song.title
+        ):
             return "不对。"
 
         song.guessed = True
@@ -577,6 +579,15 @@ class MusicGuessPlugin(Star):
         for curly, straight in (("’", "'"), ("‘", "'"), ("“", '"'), ("”", '"')):
             normalized = normalized.replace(curly, straight)
         return " ".join(normalized.split())
+
+    @staticmethod
+    def _normalize_guess_answer(text: str) -> str:
+        """猜歌专用匹配口径：保留基础答案规范化，并忽略所有 Unicode 空白。
+
+        跨曲库去重仍直接使用 _normalize_answer，不应用此处的空格增删
+        宽松匹配，避免改变现有曲池合并行为。
+        """
+        return MusicGuessPlugin._normalize_answer(text).replace(" ", "")
 
     @staticmethod
     def _is_secret_char(ch: str) -> bool:
