@@ -180,13 +180,14 @@ class MusicGuessPlugin(Star):
         self._available_libraries: list[str] = []
 
     async def initialize(self):
-        """插件初始化：扫描曲库 → 注入面板选项 → 按配置加载曲库。
+        """插件初始化：扫描曲库 → 清理失效配置 → 注入面板选项 → 加载曲库。
 
         扫描只执行一次，配置选项与加载逻辑使用同一份结果；
         曲库或目录的任何异常都不会阻止插件本身加载。
         """
         available = _scan_library_files(self._songs_dir())
         self._available_libraries = available
+        await self._remove_missing_enabled_libraries(available)
         self._inject_library_options(available)
         self._load_songs(available)
 
@@ -339,6 +340,44 @@ class MusicGuessPlugin(Star):
             ]
         except Exception:
             logger.debug("music_guess 曲库配置选项注入失败，面板将显示为手动填写列表")
+
+    async def _remove_missing_enabled_libraries(
+        self, library_files: list[str]
+    ) -> None:
+        """从启用配置中移除已不存在的曲库，并写回插件配置文件。
+
+        仅处理合法的字符串列表，保留原有顺序和重复项；配置缺失或类型
+        非法时仍交给加载逻辑按原有三态语义处理。保存失败只记录日志，
+        不阻止插件继续使用清理后的内存配置完成初始化。
+        """
+        config = self._config
+        if config is None:
+            return
+        enabled = config.get("enabled_libraries")
+        if not isinstance(enabled, list) or not all(
+            isinstance(stem, str) for stem in enabled
+        ):
+            return
+
+        available_stems = {_library_stem(name) for name in library_files}
+        cleaned = [stem for stem in enabled if stem in available_stems]
+        if cleaned == enabled:
+            return
+
+        removed = [stem for stem in enabled if stem not in available_stems]
+        config["enabled_libraries"] = cleaned
+        try:
+            await config.save_config_async()
+        except Exception:
+            logger.exception(
+                "music_guess 清理不存在曲库的启用配置时保存失败："
+                + ", ".join(removed)
+            )
+        else:
+            logger.info(
+                "music_guess 已从启用配置中清除不存在的曲库："
+                + ", ".join(removed)
+            )
 
     # ---- 曲库加载 ----
 

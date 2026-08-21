@@ -8,6 +8,7 @@
 - 标题过滤：仅保留含 ASCII 英文字母或数字（A-Z / a-z / 0-9）的标题；
 - 文件解析：UTF-8 / BOM / CRLF / 空行 / 文件内去重 / 非 UTF-8 文件跳过 / 大小上限；
 - enabled_libraries 三态：键缺失用默认、空列表不回退默认、非法类型回退默认；
+- 已不存在的启用曲库会从配置中清除并持久化；
 - 跨曲库按答案匹配口径去重；曲池不足 8 首报错；
 - 配置 schema options/labels 注入；schema 默认曲库与代码常量一致。
 
@@ -304,6 +305,15 @@ class FakeConfig(dict):
         self.schema: dict = {"enabled_libraries": {}}
 
 
+class SavingFakeConfig(dict):
+    def __init__(self, enabled_libraries):
+        super().__init__(enabled_libraries=enabled_libraries)
+        self.save_count = 0
+
+    async def save_config_async(self):
+        self.save_count += 1
+
+
 class InjectOptionsTests(SongLibraryTestCase):
     def test_options_and_labels_are_injected(self):
         config = FakeConfig()
@@ -360,6 +370,36 @@ class InitializeWiringTests(SongLibraryTestCase):
         )
         self.assertEqual(self.plugin.song_pool, _titles("PHI", 10))
         self.assertIsNone(self.plugin.song_load_error)
+
+    def test_initialize_removes_and_saves_missing_enabled_libraries(self):
+        self.write_library("phigros.txt", _titles("PHI", 10))
+        config = SavingFakeConfig(["phigros", "deleted_custom", "phigros"])
+        self.plugin._config = config
+
+        asyncio.run(self.plugin.initialize())
+
+        self.assertEqual(config["enabled_libraries"], ["phigros", "phigros"])
+        self.assertEqual(config.save_count, 1)
+        self.assertEqual(self.plugin.song_pool, _titles("PHI", 10))
+
+    def test_initialize_does_not_save_when_enabled_libraries_are_unchanged(self):
+        self.write_library("phigros.txt", _titles("PHI", 10))
+        config = SavingFakeConfig(["phigros"])
+        self.plugin._config = config
+
+        asyncio.run(self.plugin.initialize())
+
+        self.assertEqual(config["enabled_libraries"], ["phigros"])
+        self.assertEqual(config.save_count, 0)
+
+    def test_initialize_clears_all_enabled_libraries_when_files_are_missing(self):
+        config = SavingFakeConfig(["deleted_custom"])
+        self.plugin._config = config
+
+        asyncio.run(self.plugin.initialize())
+
+        self.assertEqual(config["enabled_libraries"], [])
+        self.assertEqual(config.save_count, 1)
 
 
 if __name__ == "__main__":
