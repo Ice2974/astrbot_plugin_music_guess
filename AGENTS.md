@@ -73,6 +73,7 @@ API、插件市场规范等变化内容时，优先查询当前官方文档或�
 -   `_conf_schema.json`：配置定义
 -   `README.md`：用户文档
 -   `LICENSE`：项目许可证
+-   `.astrbot-test\AstrBot`（如果有的话）: 本地测试实例目录，同时也包含AstrBot的源码
 
 除非任务证明必要，不新增复杂架构。
 
