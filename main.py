@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 import re
 import unicodedata
@@ -162,6 +163,15 @@ class MusicGuessPlugin(Star):
         self.exclusive_mode = (
             bool(config.get("exclusive_mode", False)) if config else False
         )
+        # AstrBot 对每条消息创建独立协程，同群消息会并发进入 handler。
+        # 每个群一把锁，把「状态修改 → 回复经管道实际发出」整体串行，
+        # 后一条同群消息必须等前一条的回复发出后才开始处理。
+        # 锁与持有者标记按 group_id 永久保留、不淘汰：等待中的协程持有
+        # 旧锁对象引用，淘汰后同群可能同时出现两把锁、互斥失效；单条
+        # 目只有一个 asyncio.Lock，增长上界为被 @ 过的群数，插件重载
+        # 即重置。
+        self._group_locks: dict[str, asyncio.Lock] = {}
+        self._holders: dict[str, object] = {}
         # 曲库启用配置（enabled_libraries）在 _load_songs 中按三态语义读取。
         self._config = config
 
@@ -189,6 +199,34 @@ class MusicGuessPlugin(Star):
           不回复、不停止传播；
         - exclusive_mode=true：@机器人 但无法识别的消息返回玩法提示，
           并 stop_event()，避免进入 LLM。
+
+        同群串行化：AstrBot 为每条消息创建独立协程（event_bus 的
+        create_task），同群两条消息可能并发进入本 handler，导致后一条
+        消息的题板混入前一条刚写入、回复尚未发出的状态，且回复顺序与
+        处理顺序颠倒。因此用每群一把锁把「dispatch → 回复经管道实际
+        发出」整体作为临界区：回复仍走 yield 结果，由管道的
+        ResultDecorate / RespondStage 完成装饰（@发送者、引用回复、
+        回复前缀、t2i 等）、OnDecoratingResult / OnAfterMessageSent
+        钩子与实际发送；洋葱模型下发送在 handler 挂起期间完成，锁覆盖
+        到生成器恢复并停止传播之后，同群下一条消息才开始 dispatch。
+
+        顺序边界：锁保证的是「消息进入本 handler 的顺序」内严格串行、
+        互斥、状态不混入。消息进入 handler 前若被管道前置阶段重排
+        （如内容安全远程检查、限流等待等可变延迟挂起），处理顺序可能
+        不等于平台接收顺序；此时互斥与状态不混入仍然成立。插件层无法
+        获得可靠的上游接收序号，不承诺平台绝对接收顺序。不同群使用
+        不同的锁，互不阻塞。
+
+        stop_event() 在 yield 恢复后（即回复发送完成、生成器收尾前）
+        调用，与官方内置插件同款顺序：star_request 在 handler 生成器
+        结束后检查 is_stopped 并跳过后续 handler，ProcessStage 的 LLM
+        兜底被 stop_event 写入的空 STOP 结果拦截，认领 / 放行消息的
+        拦截语义与原先一致。
+
+        锁释放：正常路径由 finally 释放；若调度器在 handler 挂起期间
+        不再恢复生成器（事件被外部 stop、装饰钩子中断）或任务被取消，
+        由管道任务完成回调按持有者标记确定释放，不依赖异步生成器
+        finalizer。
         """
         text = self._normalize_input(event.message_str)
 
@@ -200,25 +238,65 @@ class MusicGuessPlugin(Star):
         if not group_id:
             return
 
+        lock = self._group_lock(group_id)
+        await lock.acquire()
+        token = object()
+        self._holders[group_id] = token
+        # 兜底释放：管道任务结束时若锁仍由本消息持有（生成器被调度器
+        # 遗弃、任务取消），由完成回调确定释放。task 为 None（未被
+        # Task 驱动）时不存在遗弃路径，仅靠 finally。
+        task = asyncio.current_task()
+        if task is not None:
+            task.add_done_callback(lambda _task: self._release_lock(group_id, token))
+
         try:
-            if self.exclusive_mode:
-                reply = self._dispatch_exclusive(group_id, text)
-            else:
-                reply = self._dispatch_public(group_id, text)
-                if reply is None:
-                    # 普通模式下无法明确识别为本插件命令的消息放行，
-                    # 交给 AstrBot 后续的插件 / LLM 正常处理。
-                    return
-        except Exception:
-            logger.exception("music_guess 处理游戏消息时发生未预期异常")
-            reply = "游戏处理失败，请联系管理员查看 AstrBot 日志。"
+            try:
+                if self.exclusive_mode:
+                    reply = self._dispatch_exclusive(group_id, text)
+                else:
+                    reply = self._dispatch_public(group_id, text)
+                    if reply is None:
+                        # 普通模式下无法明确识别为本插件命令的消息放行，
+                        # 交给 AstrBot 后续的插件 / LLM 正常处理。
+                        return
+            except Exception:
+                logger.exception("music_guess 处理游戏消息时发生未预期异常")
+                reply = "游戏处理失败，请联系管理员查看 AstrBot 日志。"
 
-        # 先停止传播，再返回消息结果。
-        # 这样被本插件认领的消息不会继续进入其它 handler / Agent / LLM。
-        event.stop_event()
+            if reply:
+                # 洋葱模型：本次挂起期间管道完成装饰、钩子与实际发送；
+                # 锁必须覆盖到发送完成（生成器恢复），否则同群下一条
+                # 消息的题板会混入本条刚写入、尚未发出的状态。
+                yield event.plain_result(reply)
 
-        if reply:
-            yield event.plain_result(reply)
+            # 回复发送完成后（生成器恢复）再停止传播：被认领的消息不会
+            # 继续进入其它 handler / Agent / LLM。
+            event.stop_event()
+        finally:
+            self._release_lock(group_id, token)
+
+    def _group_lock(self, group_id: str) -> asyncio.Lock:
+        """获取指定群的串行化锁；单事件循环内懒创建，无需额外保护。"""
+        lock = self._group_locks.get(group_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._group_locks[group_id] = lock
+        return lock
+
+    def _release_lock(self, group_id: str, token: object) -> None:
+        """释放群锁，仅当当前持有者仍是该 token 时生效。
+
+        正常路径由 handler 的 finally 调用；生成器被调度器遗弃或任务
+        取消时由管道任务完成回调调用。两条路径可能都触发（回调也可能
+        晚于新消息接管锁），token 判重保证恰好释放一次、不误释放后继
+        消息的锁。
+        """
+        if self._holders.get(group_id) is not token:
+            return
+        del self._holders[group_id]
+        lock = self._group_locks.get(group_id)
+        if lock is not None and lock.locked():
+            lock.release()
 
     def _dispatch_public(self, group_id: str, text: str) -> str | None:
         """exclusive_mode=false：只认领「开字母」入口和进行中游戏的操作；返回 None 表示放行。"""
