@@ -9,7 +9,7 @@
 - 文件解析：UTF-8 / BOM / CRLF / 空行 / 文件内去重 / 非 UTF-8 文件跳过；
 - enabled_libraries 三态：键缺失用默认、空列表不回退默认、非法类型回退默认；
 - 跨曲库按答案匹配口径去重；曲池不足 8 首报错；
-- 配置 schema options/labels 注入；旧版更新缓存严格清理。
+- 配置 schema options/labels 注入。
 
 无法覆盖真实 AstrBot WebUI 的复选框渲染与热重载，该部分需按 README
 人工验收步骤在实机验证。
@@ -278,62 +278,6 @@ class InjectOptionsTests(SongLibraryTestCase):
         self.plugin._config = config
         self.plugin._inject_library_options([])
         self.assertEqual(config.schema["enabled_libraries"], {})
-
-
-# ---- 旧版更新缓存清理 ----
-
-
-class LegacyCacheTests(unittest.TestCase):
-    def test_legacy_cache_name_matching(self):
-        sha = "a" * 64
-        for name in [
-            "manifest.json",
-            "manifest.json.tmp",
-            f"songs-{sha}.txt",
-            f"songs-{sha}.txt.tmp",
-        ]:
-            with self.subTest(name=name):
-                self.assertTrue(main._is_legacy_cache_name(name))
-        for name in [
-            "songs-not-hex.txt",
-            "user_notes.txt",
-            "songs-abc.txt",
-            f"songs-{'a' * 63}.txt",  # 长度不足 64
-            f"songs-{'A' * 64}.txt",  # 大写十六进制不匹配
-            "other.json",
-            "keep.bin",
-        ]:
-            with self.subTest(name=name):
-                self.assertFalse(main._is_legacy_cache_name(name))
-
-    def test_cleanup_removes_only_legacy_files(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        data_dir = Path(tmp.name)
-        sha = "0" * 64
-        legacy = [
-            "manifest.json",
-            "manifest.json.tmp",
-            f"songs-{sha}.txt",
-            f"songs-{sha}.txt.tmp",
-        ]
-        keep = ["songs-not-hex.txt", "user_notes.txt", "other.json", "keep.bin"]
-        for name in legacy + keep:
-            (data_dir / name).write_text("x", encoding="utf-8")
-
-        plugin = main.MusicGuessPlugin(context=None, config={})
-        plugin._data_dir = data_dir
-        plugin._cleanup_legacy_cache()
-
-        for name in legacy:
-            self.assertFalse((data_dir / name).exists(), name)
-        for name in keep:
-            self.assertTrue((data_dir / name).exists(), name)
-
-    def test_cleanup_without_data_dir_is_noop(self):
-        plugin = main.MusicGuessPlugin(context=None, config={})
-        plugin._data_dir = None
-        plugin._cleanup_legacy_cache()  # 不应抛异常
 
 
 # ---- initialize 接线：扫描一次，注入与加载共用结果 ----

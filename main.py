@@ -12,7 +12,7 @@ from pathlib import Path
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Plain
-from astrbot.api.star import Context, Star, StarTools
+from astrbot.api.star import Context, Star
 
 
 SONGS_DIR_NAME = "songs"
@@ -57,12 +57,6 @@ LIBRARY_DISPLAY_NAMES = {
 # 全角数字、罗马数字、带圈数字、纯中文、纯日文、纯符号等标题不含上述字符，一律过滤。
 _PLAYABLE_PATTERN = re.compile(r"[A-Za-z0-9]")
 
-# 旧版远程曲库更新机制（已移除）遗留在插件数据目录中的缓存文件名：
-# manifest.json 提交点、songs-<64 位小写十六进制>.txt 内容寻址曲库，含各自 .tmp 残留。
-_LEGACY_MANIFEST_NAME = "manifest.json"
-_LEGACY_CACHE_PATTERN = re.compile(r"songs-[0-9a-f]{64}\.txt")
-
-
 @dataclass(slots=True)
 class RoundSong:
     title: str
@@ -95,7 +89,7 @@ class AtBotFilter(filter.CustomFilter):
 
 
 # ---------------------------------------------------------------------------
-# 曲库加载：模块级纯函数（扫描 / 过滤 / 解析 / 旧缓存识别）
+# 曲库加载：模块级纯函数（扫描 / 过滤 / 解析）
 # ---------------------------------------------------------------------------
 
 
@@ -163,12 +157,6 @@ def _read_library_titles(path: Path) -> list[str] | None:
     return [title for title in _parse_song_titles(text) if _title_is_playable(title)]
 
 
-def _is_legacy_cache_name(name: str) -> bool:
-    """判断数据目录中的文件是否为旧版更新机制产生的缓存文件（含 .tmp 残留）。"""
-    base = name[: -len(".tmp")] if name.endswith(".tmp") else name
-    return base == _LEGACY_MANIFEST_NAME or bool(_LEGACY_CACHE_PATTERN.fullmatch(base))
-
-
 class MusicGuessPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -181,20 +169,15 @@ class MusicGuessPlugin(Star):
         # 曲库启用配置（enabled_libraries）在 _load_songs 中按三态语义读取；
         # 注入面板选项时需要访问 schema，因此保留引用。
         self._config = config
-        # AstrBot 插件数据目录（仅用于清理旧版更新缓存），initialize() 中解析；
-        # None 表示不可用：跳过清理。
-        self._data_dir: Path | None = None
         # initialize() 扫描得到的曲库文件名列表；面板选项注入与曲库加载共用这一份结果。
         self._available_libraries: list[str] = []
 
     async def initialize(self):
-        """插件初始化：清理旧缓存 → 扫描曲库 → 注入面板选项 → 按配置加载曲库。
+        """插件初始化：扫描曲库 → 注入面板选项 → 按配置加载曲库。
 
         扫描只执行一次，配置选项与加载逻辑使用同一份结果；
         曲库或目录的任何异常都不会阻止插件本身加载。
         """
-        self._data_dir = self._resolve_data_dir()
-        self._cleanup_legacy_cache()
         available = _scan_library_files(self._songs_dir())
         self._available_libraries = available
         self._inject_library_options(available)
@@ -318,50 +301,11 @@ class MusicGuessPlugin(Star):
             )
         return "请 @机器人 后发送「开字母」开始一局。AstrBot 系统指令可使用 /help。"
 
-    # ---- 曲库目录、旧缓存清理与配置选项注入 ----
+    # ---- 曲库目录与配置选项注入 ----
 
     @staticmethod
     def _songs_dir() -> Path:
         return Path(__file__).resolve().parent / SONGS_DIR_NAME
-
-    def _resolve_data_dir(self) -> Path | None:
-        """获取 AstrBot 官方插件数据目录；失败时返回 None（跳过旧缓存清理）。"""
-        try:
-            return StarTools.get_data_dir("astrbot_plugin_music_guess")
-        except Exception:
-            logger.warning("music_guess 无法获取插件数据目录，跳过旧版曲库缓存清理")
-            return None
-
-    def _cleanup_legacy_cache(self) -> None:
-        """清理旧版远程更新机制遗留在插件数据目录中的缓存文件。
-
-        只逐个删除与旧缓存命名精确匹配的文件（manifest.json、
-        songs-<sha256>.txt 及对应 .tmp 残留），数据目录中的其他任何文件
-        （以及 songs/ 曲库目录）一律不动。
-        """
-        data_dir = self._data_dir
-        if data_dir is None:
-            return
-        try:
-            leftovers = [
-                item
-                for item in data_dir.iterdir()
-                if item.is_file() and _is_legacy_cache_name(item.name)
-            ]
-        except OSError:
-            return
-        removed = 0
-        for item in leftovers:
-            try:
-                item.unlink()
-                removed += 1
-            except OSError:
-                pass
-        if removed:
-            logger.info(
-                f"music_guess 已清理 {removed} 个旧版曲库更新缓存文件"
-                "（远程自动更新机制已移除，曲库改为随插件仓库维护）"
-            )
 
     def _inject_library_options(self, library_files: list[str]) -> None:
         """把扫描到的曲库写入配置 schema 的 options / labels，供 WebUI 复选框展示。

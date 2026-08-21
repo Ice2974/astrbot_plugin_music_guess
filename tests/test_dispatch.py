@@ -96,9 +96,6 @@ def _install_astrbot_stubs() -> None:
     components.Plain = Plain
     star.Context = object
     star.Star = Star
-    # 曲库更新代码只引用 StarTools.get_data_dir；默认占位，具体行为由测试按需替换。
-    star.StarTools = types.SimpleNamespace()
-
     astrbot.api = api
     astrbot.api.event = event
     astrbot.api.event.filter = filter_mod
