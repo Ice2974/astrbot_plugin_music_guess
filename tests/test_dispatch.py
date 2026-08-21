@@ -8,7 +8,8 @@
 - 游戏进行中开字符 / 猜歌 / 结束被认领并 stop_event；
 - 独占模式接管无法识别消息，/ 指令放行；
 - A / B 群游戏状态隔离下相同格式的认领与放行；
-- priority=1 声明在最底部装饰器上（源码级断言）。
+- priority=1 声明在最底部装饰器上（源码级断言）；
+- AtBotFilter.filter / _normalize_answer / _mask_title 的直接行为。
 
 无法覆盖真实 AstrBot 的 handler 注册与多插件执行顺序，
 该部分需按 README 人工验收步骤在实机验证。
@@ -54,6 +55,7 @@ def _install_astrbot_stubs() -> None:
         def info(self, msg): ...
         def warning(self, msg): ...
         def exception(self, msg): ...
+        def debug(self, msg): ...
 
     class CustomFilter:
         pass
@@ -315,6 +317,122 @@ class DispatchTests(unittest.TestCase):
             "filter.PlatformAdapterType.QQOFFICIAL, priority=1)",
             source,
         )
+
+
+# ---- AtBotFilter：@机器人 判定 ----
+
+
+class FilterEvent:
+    """AtBotFilter.filter 用到的最小事件接口。"""
+
+    def __init__(self, self_id, segments):
+        self._self_id = self_id
+        self._segments = segments
+
+    def get_self_id(self):
+        return self._self_id
+
+    def get_messages(self):
+        return self._segments
+
+
+class AtBotFilterTests(unittest.TestCase):
+    def setUp(self):
+        self.filter = main.AtBotFilter()
+
+    def _check(self, self_id, *segments):
+        return self.filter.filter(FilterEvent(self_id, list(segments)), None)
+
+    def test_at_self_passes(self):
+        self.assertTrue(self._check("10001", main.At(qq="10001")))
+
+    def test_int_qq_matches_string_self_id(self):
+        self.assertTrue(self._check("10001", main.At(qq=10001)))
+
+    def test_at_other_user_fails(self):
+        self.assertFalse(self._check("10001", main.At(qq="10002")))
+
+    def test_at_all_fails(self):
+        self.assertFalse(self._check("10001", main.At(qq="all")))
+
+    def test_plain_only_fails(self):
+        self.assertFalse(self._check("10001", main.Plain("开字母")))
+
+    def test_mixed_segments_at_self_passes(self):
+        self.assertTrue(
+            self._check(
+                "10001", main.Plain("开 A"), main.At(qq="10001")
+            )
+        )
+
+    def test_empty_self_id_fails(self):
+        self.assertFalse(self._check("", main.At(qq="10001")))
+        self.assertFalse(self._check(None, main.At(qq="10001")))
+
+
+# ---- _normalize_answer：答案匹配口径 ----
+
+
+class NormalizeAnswerTests(unittest.TestCase):
+    normalize = staticmethod(main.MusicGuessPlugin._normalize_answer)
+
+    def test_case_insensitive(self):
+        self.assertEqual(self.normalize("Credits"), self.normalize("credits"))
+        self.assertEqual(self.normalize("CREDITS"), self.normalize("credits"))
+
+    def test_nfkc_fullwidth_equals_halfwidth(self):
+        self.assertEqual(self.normalize("ｃｒｅｄｉｔｓ"), self.normalize("credits"))
+
+    def test_curly_quotes_equal_straight(self):
+        self.assertEqual(self.normalize("Lyrical ’94"), self.normalize("Lyrical '94"))
+        self.assertEqual(self.normalize("“x”"), self.normalize('"x"'))
+        self.assertEqual(self.normalize("‘x’"), self.normalize("'x'"))
+
+    def test_whitespace_collapsed_and_stripped(self):
+        self.assertEqual(self.normalize("  Alpha   Ray "), self.normalize("alpha ray"))
+
+    def test_punctuation_must_match(self):
+        self.assertNotEqual(self.normalize("Alpha Ray"), self.normalize("Alpha-Ray"))
+        self.assertNotEqual(self.normalize("Track 7!"), self.normalize("Track 7"))
+
+    def test_empty_and_none_are_safe(self):
+        self.assertEqual(self.normalize(""), "")
+        self.assertEqual(self.normalize(None), "")
+
+
+# ---- _mask_title：遮罩规则 ----
+
+
+class MaskTitleTests(unittest.TestCase):
+    def setUp(self):
+        self.plugin = main.MusicGuessPlugin(context=None)
+
+    def mask(self, title, opened=None):
+        return self.plugin._mask_title(title, set(opened or []))
+
+    def test_letters_masked(self):
+        self.assertEqual(self.mask("Credits"), "•••••••")
+
+    def test_spaces_shown(self):
+        self.assertEqual(self.mask("World Vanquisher"), "••••• ••••••••••")
+
+    def test_cjk_masked(self):
+        self.assertEqual(self.mask("千本桜"), "•••")
+
+    def test_punctuation_shown(self):
+        self.assertEqual(self.mask("LUDICROUS+"), "•••••••••+")
+
+    def test_ascii_digits_masked(self):
+        self.assertEqual(self.mask("Track 7"), "••••• •")
+
+    def test_fullwidth_digits_shown(self):
+        self.assertEqual(self.mask("Mix ２４"), "••• ２４")
+
+    def test_opened_char_reveals_both_cases(self):
+        self.assertEqual(self.mask("Alpha Beta", {"a"}), "A•••a •••a")
+
+    def test_opened_cjk_char_revealed(self):
+        self.assertEqual(self.mask("千本桜", {"桜"}), "••桜")
 
 
 if __name__ == "__main__":

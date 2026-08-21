@@ -17,6 +17,9 @@ from astrbot.api.star import Context, Star
 
 SONGS_DIR_NAME = "songs"
 GAME_SONG_COUNT = 8
+# 单个曲库文件大小上限：防止误放入超大自定义 txt 在初始化时阻塞事件循环、
+# 占用过多内存。内置最大曲库约 50KB，2MB 已留足余量。
+MAX_LIBRARY_FILE_BYTES = 2 * 1024 * 1024
 
 # QQ 官方客户端会把连续半角 * 按 Markdown 语法解释。
 # 使用紧凑的 Bullet 字符 • 作为遮罩，既避开 Markdown，又能明显保留单词空格。
@@ -147,10 +150,13 @@ def _library_stem(filename: str) -> str:
 def _read_library_titles(path: Path) -> list[str] | None:
     """读取单个曲库文件并过滤，返回适合玩法的曲名列表。
 
-    文件不可读或非 UTF-8（兼容 BOM）返回 None，由调用方跳过该库；
-    空行忽略、完全相同的重复行只保留一次（与单文件曲库时代一致）。
+    文件不可读、非 UTF-8（兼容 BOM）或超过 MAX_LIBRARY_FILE_BYTES
+    返回 None，由调用方跳过该库；空行忽略、完全相同的重复行只保留
+    一次（与单文件曲库时代一致）。
     """
     try:
+        if path.stat().st_size > MAX_LIBRARY_FILE_BYTES:
+            return None
         text = path.read_bytes().decode("utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return None
@@ -408,7 +414,8 @@ class MusicGuessPlugin(Star):
             titles = _read_library_titles(songs_dir / name)
             if titles is None:
                 logger.warning(
-                    f"music_guess 曲库 {name} 读取失败（不可读或非 UTF-8），已跳过"
+                    f"music_guess 曲库 {name} 读取失败"
+                    "（不可读、非 UTF-8 或超过 2MB 大小上限），已跳过"
                 )
                 continue
             kept = 0

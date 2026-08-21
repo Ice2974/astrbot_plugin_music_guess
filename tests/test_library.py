@@ -6,10 +6,10 @@
 复用 test_dispatch 的 astrbot 桩模块导入 main.py，验证：
 - songs/ 目录扫描：仅直接子级 txt、扩展名大小写不敏感、忽略子目录 / 其他扩展名 / 隐藏文件；
 - 标题过滤：仅保留含 ASCII 英文字母或数字（A-Z / a-z / 0-9）的标题；
-- 文件解析：UTF-8 / BOM / CRLF / 空行 / 文件内去重 / 非 UTF-8 文件跳过；
+- 文件解析：UTF-8 / BOM / CRLF / 空行 / 文件内去重 / 非 UTF-8 文件跳过 / 大小上限；
 - enabled_libraries 三态：键缺失用默认、空列表不回退默认、非法类型回退默认；
 - 跨曲库按答案匹配口径去重；曲池不足 8 首报错；
-- 配置 schema options/labels 注入。
+- 配置 schema options/labels 注入；schema 默认曲库与代码常量一致。
 
 无法覆盖真实 AstrBot WebUI 的复选框渲染与热重载，该部分需按 README
 人工验收步骤在实机验证。
@@ -18,12 +18,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 import test_dispatch
-from test_dispatch import main
+from test_dispatch import REPO_ROOT, main
 
 
 def _titles(prefix: str, count: int) -> list[str]:
@@ -162,6 +163,23 @@ class ReadLibraryTests(unittest.TestCase):
         path.write_text("", encoding="utf-8")
         self.assertEqual(main._read_library_titles(path), [])
 
+    def test_oversized_file_returns_none(self):
+        original = main.MAX_LIBRARY_FILE_BYTES
+        self.addCleanup(setattr, main, "MAX_LIBRARY_FILE_BYTES", original)
+        main.MAX_LIBRARY_FILE_BYTES = 8
+        path = self.dir / "big.txt"
+        path.write_bytes(b"Song One\n")  # 9 字节 > 8
+        self.assertIsNone(main._read_library_titles(path))
+
+    def test_file_exactly_at_limit_loads(self):
+        original = main.MAX_LIBRARY_FILE_BYTES
+        self.addCleanup(setattr, main, "MAX_LIBRARY_FILE_BYTES", original)
+        content = b"Song One\n"  # 9 字节，恰好等于下调后的上限
+        main.MAX_LIBRARY_FILE_BYTES = len(content)
+        path = self.dir / "edge.txt"
+        path.write_bytes(content)
+        self.assertEqual(main._read_library_titles(path), ["Song One"])
+
 
 # ---- enabled_libraries 三态与合并去重 ----
 
@@ -237,6 +255,18 @@ class LoadSongsTests(SongLibraryTestCase):
         self.assertIsNone(self.plugin.song_load_error)
         self.assertEqual(self.plugin.song_pool, _titles("GOOD", 10))
 
+    def test_oversized_library_is_skipped_but_others_load(self):
+        original = main.MAX_LIBRARY_FILE_BYTES
+        self.addCleanup(setattr, main, "MAX_LIBRARY_FILE_BYTES", original)
+        self.write_library("good.txt", _titles("GOOD", 10))
+        # 上限恰好等于 good.txt 实际大小：good 可加载，huge 比上限多 1 字节被跳过。
+        good_size = (self.songs_dir / "good.txt").stat().st_size
+        main.MAX_LIBRARY_FILE_BYTES = good_size
+        (self.songs_dir / "huge.txt").write_bytes(b"x" * good_size + b"\n")
+        self.load(config={"enabled_libraries": ["huge", "good"]})
+        self.assertIsNone(self.plugin.song_load_error)
+        self.assertEqual(self.plugin.song_pool, _titles("GOOD", 10))
+
     def test_missing_songs_dir_reports_error(self):
         self.plugin._songs_dir = lambda: self.songs_dir.parent / "nope"  # type: ignore[method-assign]
         self.load()
@@ -278,6 +308,20 @@ class InjectOptionsTests(SongLibraryTestCase):
         self.plugin._config = config
         self.plugin._inject_library_options([])
         self.assertEqual(config.schema["enabled_libraries"], {})
+
+
+# ---- schema 默认曲库与代码常量一致（防双处维护漂移） ----
+
+
+class SchemaDefaultsTests(unittest.TestCase):
+    def test_enabled_libraries_default_matches_code_constant(self):
+        schema = json.loads(
+            (REPO_ROOT / "_conf_schema.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            schema["enabled_libraries"]["default"],
+            main.DEFAULT_ENABLED_LIBRARIES,
+        )
 
 
 # ---- initialize 接线：扫描一次，注入与加载共用结果 ----

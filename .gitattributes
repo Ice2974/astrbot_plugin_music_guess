@@ -1,0 +1,2 @@
+# 统一文本文件换行符为 LF，避免 Windows autocrlf 造成 CRLF/LF 混用警告
+* text=auto eol=lf
