@@ -343,7 +343,7 @@ class MusicGuessPlugin(Star):
             return (
                 "无法识别这条游戏消息。\n\n"
                 "以下操作均需 @机器人：\n"
-                "开字符：开 A / 开 7 / 开 桜\n"
+                "开字符：开 A / 开 7 / 开 少\n"
                 "猜歌曲：3 Credits（或 曲 3 Credits）\n"
                 "结束：结束开字母"
             )
@@ -359,7 +359,7 @@ class MusicGuessPlugin(Star):
         if group_id in self.games:
             return (
                 "以下操作均需 @机器人：\n"
-                "开字符：开 A / 开 7 / 开 桜\n"
+                "开字符：开 A / 开 7 / 开 少\n"
                 "猜歌曲：3 Credits（或 曲 3 Credits）\n"
                 "结束：结束开字母"
             )
@@ -492,7 +492,7 @@ class MusicGuessPlugin(Star):
             "开字母开始！\n\n"
             f"{self._render_board(state)}\n\n"
             "以下操作均需 @机器人：\n"
-            "开字符：开 A / 开 7 / 开 桜\n"
+            "开字符：开 A / 开 7 / 开 少\n"
             "猜歌曲：3 Credits（或 曲 3 Credits）\n"
             "结束：结束开字母"
         )
@@ -503,7 +503,7 @@ class MusicGuessPlugin(Star):
             return "本群当前没有进行中的开字母游戏。请 @机器人 后发送「开字母」开始一局。"
 
         if not self._is_openable_char(char):
-            return "一次只能开一个字母或数字，例如：@机器人 开 A / 开 7 / 开 桜。"
+            return "一次只能开一个字母或数字，例如：@机器人 开 A / 开 7 / 开 少。"
 
         key = char.casefold()
         display_char = char.upper() if char.isalpha() else char

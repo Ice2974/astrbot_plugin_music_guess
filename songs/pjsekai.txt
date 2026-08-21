@@ -28,16 +28,8 @@ Hibikase
 Senbonzakura
 Pick Me Up
 My Stage With You
-Tàbù, Chūfā
-Chūlán
 We Leave The World Together
-Jìng Zhōng Shàonǚ
-Mèngsè Xīngqiú
-Yuèguò Hǎi'ànxiàn
-Lái Dōu Lái le
 HIMAN=HIDAI Shousoukyoku
-Yuè Xī Jiāng · Chūnléi
-Mǎi Mǎi Mǎi
 Mag1c
 Rolling Girl
 Ura Omote Lovers
@@ -74,7 +66,6 @@ Black ★ Rock Shooter
 Copycat
 Bokura no 16bit Sensou
 Kusaregedou to Chocolate
-Fräulein=Biblioteca
 Double Lariat
 Hoshikuzu Utopia
 Highlight
@@ -166,7 +157,6 @@ Blackjack
 M@GICAL☆CURE! LOVE ♥ SHOT!
 No da
 Proto Disco
-Ángel
 NAKAKAPAGPABAGABAG
 Panda Hero
 Musunde Hiraite Rasetsu to Mukuro
@@ -223,7 +213,6 @@ Yuugen no Ran
 Hatsune Miku no Shoushitsu-Gekijouban-
 Wanderlast
 Nyanyanyanyanyanyanya!
-Fräulein=Ojousama
 Ribbon
 Maku wo Orosou, Parade e
 SHIAWASE FOR YOU!
@@ -300,7 +289,6 @@ Ikanaide
 Romeo to Cinderella
 Positive☆Dance Time
 Dreamin Chuchu
-Bocca della Verità
 Bitter Choco Decoration
 Akuma no Odorikata
 Telecaster B-Boy
@@ -314,7 +302,6 @@ Rimokon
 Karakuri Pierrot
 ray
 Chikyuu Saigo no Kokuhaku wo
-Shinpakusuu♯0822
 Marshmary
 Nonsense Bungaku
 Alter Ego
@@ -323,7 +310,6 @@ Shoujorei
 villain
 Kagerou Daze
 Happy Halloween
-Yī Èr Fanclub
 Aishite Aishite Aishite
 fixer
 Hello,world!
@@ -453,7 +439,6 @@ Odoryanse
 Nisemono Ningen 40-gou
 Mikazuki Step
 Chuubyou Gekihatsu Boy
-Yankee Boy・Yankee Girl
 ENVY CAT WALK
 Ruma
 Do Re Mi Fa Rondo
@@ -516,7 +501,6 @@ More! Jump! More!
 RAD DOGS
 NIJIIRO STORIES
 Once Upon a Dream
-Yīyàng
 Hype Dive
 Tenshi no Clover
 IDSMILE
@@ -568,7 +552,6 @@ Parasol Cider
 Kashika
 Utsuro wo Aogu
 Hoshizora Orchestra
-ÅMARA
 Watashi wa, Watashitachi wa
 Donna Ketsumatsu ga Onozomi dai?
 Float Planner
@@ -697,7 +680,6 @@ REM
 Tenbin, Yubisaki de Furete
 Marude Nijuu Furiko no Sekai!
 alive
-Dīcǎidù Jìshì
 Brand New Day
 Hana wo Utau
 Utakata Mirai
