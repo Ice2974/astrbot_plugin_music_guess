@@ -9,10 +9,10 @@
     "description": "启用曲库",
     "type": "list",
     "items": {"type": "string"},
-    "options": [],
-    "labels": [],
+    "options": ["phigros", "arcaea", "musedash", "maimai", "cytus", "cytus2", "deemo", "djmax", "lanota", "rotaeno", "chunithm", "soundvoltex", "pjsekai", "adofai", "beatsaber"],
+    "labels": ["Phigros", "Arcaea", "Muse Dash", "maimai", "Cytus", "Cytus II", "Deemo", "DJMAX", "Lanota", "Rotaeno", "CHUNITHM", "SOUND VOLTEX", "Project SEKAI", "A Dance of Fire and Ice", "Beat Saber"],
     "render_type": "checkbox",
     "default": ["phigros", "arcaea", "musedash", "maimai"],
-    "hint": "勾选启用插件 songs/ 目录下的曲库。选项列表由插件启动时根据实际存在的 txt 文件动态生成。自定义曲库：把 UTF-8 编码、每行一个曲名的 txt 文件放入插件安装目录的 songs/ 后重载插件，即可出现在列表中（扩展名大小写不限）。清空全部勾选等于关闭所有曲库，游戏将无法开始（不会自动恢复默认）。修改后需重载插件生效。"
+    "hint": "勾选启用插件内置曲库。可用曲库及其文件位置由插件代码固定定义，不会扫描 songs/ 目录或识别额外的 txt 文件。清空全部勾选等于关闭所有曲库，游戏将无法开始（不会自动恢复默认）。修改后需重载插件生效。"
   }
 }

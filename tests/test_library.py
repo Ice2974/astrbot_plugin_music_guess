@@ -4,13 +4,12 @@
 """曲库加载测试（仅标准库，不依赖真实 AstrBot 环境）。
 
 复用 test_dispatch 的 astrbot 桩模块导入 main.py，验证：
-- songs/ 目录扫描：仅直接子级 txt、扩展名大小写不敏感、忽略子目录 / 其他扩展名 / 隐藏文件；
+- 内置曲库使用固定标识和文件位置，不扫描 songs/ 或识别额外文件；
 - 标题过滤：仅保留含 ASCII 英文字母或数字（A-Z / a-z / 0-9）的标题；
 - 文件解析：UTF-8 / BOM / CRLF / 空行 / 文件内去重 / 非 UTF-8 文件跳过 / 大小上限；
 - enabled_libraries 三态：键缺失用默认、空列表不回退默认、非法类型回退默认；
-- 已不存在的启用曲库会从配置中清除并持久化；
 - 跨曲库按答案匹配口径去重；曲池不足 8 首报错；
-- 配置 schema options/labels 注入；schema 默认曲库与代码常量一致。
+- 配置 schema 的固定 options/labels 与代码常量一致。
 
 无法覆盖真实 AstrBot WebUI 的复选框渲染与热重载，该部分需按 README
 人工验收步骤在实机验证。
@@ -33,7 +32,7 @@ def _titles(prefix: str, count: int) -> list[str]:
 
 
 class SongLibraryTestCase(unittest.TestCase):
-    """公共设施：临时 songs/ 目录 + _songs_dir 指向该目录的插件实例。"""
+    """公共设施：临时插件目录 + _plugin_dir 指向该目录的插件实例。"""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -41,7 +40,7 @@ class SongLibraryTestCase(unittest.TestCase):
         self.songs_dir = Path(tmp.name) / "songs"
         self.songs_dir.mkdir()
         self.plugin = main.MusicGuessPlugin(context=None, config={})
-        self.plugin._songs_dir = lambda: self.songs_dir  # type: ignore[method-assign]
+        self.plugin._plugin_dir = lambda: Path(tmp.name)  # type: ignore[method-assign]
 
     def write_library(self, filename: str, titles: list[str]) -> None:
         content = "\n".join(titles) + "\n"
@@ -58,7 +57,7 @@ class SongLibraryTestCase(unittest.TestCase):
     def load(self, config: dict | None = None) -> None:
         if config is not None:
             self.plugin._config = config
-        self.plugin._load_songs(main._scan_library_files(self.songs_dir))
+        self.plugin._load_songs()
 
 
 # ---- 标题过滤（ASCII 英文字母 / 数字口径） ----
@@ -96,41 +95,22 @@ class TitleFilterTests(unittest.TestCase):
                 self.assertFalse(main._title_is_playable(title))
 
 
-# ---- 目录扫描 ----
+# ---- 内置曲库固定映射 ----
 
 
-class ScanTests(unittest.TestCase):
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.songs_dir = Path(tmp.name)
+class BuiltinLibraryMappingTests(unittest.TestCase):
+    def test_mapping_covers_repository_song_files(self):
+        mapped_paths = set(main.BUILTIN_LIBRARY_FILES.values())
+        repository_paths = {
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in (REPO_ROOT / "songs").glob("*.txt")
+        }
+        self.assertEqual(mapped_paths, repository_paths)
 
-    def test_scan_matches_txt_case_insensitively(self):
-        for name in ["a.txt", "B.TXT", "c.Txt"]:
-            (self.songs_dir / name).write_text("Song\n", encoding="utf-8")
+    def test_display_names_cover_every_builtin_library(self):
         self.assertEqual(
-            main._scan_library_files(self.songs_dir), ["B.TXT", "a.txt", "c.Txt"]
+            set(main.BUILTIN_LIBRARY_FILES), set(main.LIBRARY_DISPLAY_NAMES)
         )
-
-    def test_scan_ignores_non_txt_subdirs_and_hidden(self):
-        (self.songs_dir / "notes.md").write_text("x", encoding="utf-8")
-        (self.songs_dir / "backup.bak").write_text("x", encoding="utf-8")
-        (self.songs_dir / ".hidden.txt").write_text("x", encoding="utf-8")
-        (self.songs_dir / ".txt").write_text("x", encoding="utf-8")
-        sub = self.songs_dir / "sub"
-        sub.mkdir()
-        (sub / "inner.txt").write_text("x", encoding="utf-8")
-        self.assertEqual(main._scan_library_files(self.songs_dir), [])
-
-    def test_scan_missing_dir_returns_empty(self):
-        self.assertEqual(
-            main._scan_library_files(self.songs_dir / "nope"), []
-        )
-
-    def test_library_stem_strips_any_case_extension(self):
-        self.assertEqual(main._library_stem("phigros.txt"), "phigros")
-        self.assertEqual(main._library_stem("MYLIB.TXT"), "MYLIB")
-        self.assertEqual(main._library_stem("c.Txt"), "c")
 
 
 # ---- 单文件读取与解析 ----
@@ -220,11 +200,11 @@ class LoadSongsTests(SongLibraryTestCase):
         self.load(config={"enabled_libraries": ["adofai"]})
         self.assertEqual(self.plugin.song_pool, _titles("ADO", 10))
 
-    def test_uppercase_extension_library_loads(self):
-        self.write_library("MYLIB.TXT", _titles("UP", 10))
-        self.load(config={"enabled_libraries": ["MYLIB"]})
-        self.assertIsNone(self.plugin.song_load_error)
-        self.assertEqual(self.plugin.song_pool, _titles("UP", 10))
+    def test_extra_txt_file_is_not_recognized(self):
+        self.write_library("custom.txt", _titles("CUSTOM", 10))
+        self.load(config={"enabled_libraries": ["custom"]})
+        self.assertEqual(self.plugin.song_pool, [])
+        self.assertIn("未启用任何曲库", self.plugin.song_load_error)
 
     def test_cross_library_dedup_by_normalized_answer(self):
         self.write_library(
@@ -237,11 +217,11 @@ class LoadSongsTests(SongLibraryTestCase):
         )
         self.load(config={"enabled_libraries": ["phigros", "arcaea"]})
         self.assertEqual(len(self.plugin.song_pool), 18)
-        # 按扫描排序 arcaea.txt 先加载，保留首次出现（arcaea 的写法）。
-        self.assertIn("alpha  ray", self.plugin.song_pool)
-        self.assertIn("Lyrical '94", self.plugin.song_pool)
-        self.assertNotIn("Alpha Ray", self.plugin.song_pool)
-        self.assertNotIn("Lyrical ’94", self.plugin.song_pool)
+        # 按硬编码映射顺序加载，保留首次出现（phigros 的写法）。
+        self.assertIn("Alpha Ray", self.plugin.song_pool)
+        self.assertIn("Lyrical ’94", self.plugin.song_pool)
+        self.assertNotIn("alpha  ray", self.plugin.song_pool)
+        self.assertNotIn("Lyrical '94", self.plugin.song_pool)
 
     def test_cross_library_dedup_keeps_spacing_variants(self):
         self.write_library(
@@ -260,146 +240,84 @@ class LoadSongsTests(SongLibraryTestCase):
         self.assertIn("BIGSHOT", self.plugin.song_pool)
 
     def test_merged_pool_below_minimum_reports_error(self):
-        self.write_library("tiny.txt", _titles("T", 5))
-        self.load(config={"enabled_libraries": ["tiny"]})
+        self.write_library("phigros.txt", _titles("T", 5))
+        self.load(config={"enabled_libraries": ["phigros"]})
         self.assertEqual(self.plugin.song_pool, [])
         self.assertIn("至少需要 8 首", self.plugin.song_load_error)
 
     def test_unreadable_library_is_skipped_but_others_load(self):
-        (self.songs_dir / "gbklib.txt").write_bytes("純中文".encode("gbk"))
-        self.write_library("good.txt", _titles("GOOD", 10))
-        self.load(config={"enabled_libraries": ["gbklib", "good"]})
+        (self.songs_dir / "phigros.txt").write_bytes("純中文".encode("gbk"))
+        self.write_library("arcaea.txt", _titles("GOOD", 10))
+        self.load(config={"enabled_libraries": ["phigros", "arcaea"]})
         self.assertIsNone(self.plugin.song_load_error)
         self.assertEqual(self.plugin.song_pool, _titles("GOOD", 10))
 
     def test_oversized_library_is_skipped_but_others_load(self):
         original = main.MAX_LIBRARY_FILE_BYTES
         self.addCleanup(setattr, main, "MAX_LIBRARY_FILE_BYTES", original)
-        self.write_library("good.txt", _titles("GOOD", 10))
-        # 上限恰好等于 good.txt 实际大小：good 可加载，huge 比上限多 1 字节被跳过。
-        good_size = (self.songs_dir / "good.txt").stat().st_size
+        self.write_library("arcaea.txt", _titles("GOOD", 10))
+        # 上限恰好等于 arcaea.txt 实际大小；phigros 比上限多 1 字节被跳过。
+        good_size = (self.songs_dir / "arcaea.txt").stat().st_size
         main.MAX_LIBRARY_FILE_BYTES = good_size
-        (self.songs_dir / "huge.txt").write_bytes(b"x" * good_size + b"\n")
-        self.load(config={"enabled_libraries": ["huge", "good"]})
+        (self.songs_dir / "phigros.txt").write_bytes(b"x" * good_size + b"\n")
+        self.load(config={"enabled_libraries": ["phigros", "arcaea"]})
         self.assertIsNone(self.plugin.song_load_error)
         self.assertEqual(self.plugin.song_pool, _titles("GOOD", 10))
 
-    def test_missing_songs_dir_reports_error(self):
-        self.plugin._songs_dir = lambda: self.songs_dir.parent / "nope"  # type: ignore[method-assign]
-        self.load()
+    def test_missing_enabled_builtin_files_report_error(self):
+        self.load(config={"enabled_libraries": ["phigros"]})
         self.assertEqual(self.plugin.song_pool, [])
-        self.assertIn("曲库目录不存在", self.plugin.song_load_error)
-
-    def test_empty_songs_dir_reports_error(self):
-        self.load()
-        self.assertEqual(self.plugin.song_pool, [])
-        self.assertIn("没有可用的 txt 曲库文件", self.plugin.song_load_error)
+        self.assertIn("至少需要 8 首", self.plugin.song_load_error)
 
 
-# ---- 配置 schema 选项注入 ----
-
-
-class FakeConfig(dict):
-    def __init__(self):
-        super().__init__()
-        self.schema: dict = {"enabled_libraries": {}}
-
-
-class SavingFakeConfig(dict):
-    def __init__(self, enabled_libraries):
-        super().__init__(enabled_libraries=enabled_libraries)
-        self.save_count = 0
-
-    async def save_config_async(self):
-        self.save_count += 1
-
-
-class InjectOptionsTests(SongLibraryTestCase):
-    def test_options_and_labels_are_injected(self):
-        config = FakeConfig()
-        self.plugin._config = config
-        self.plugin._inject_library_options(
-            ["phigros.txt", "mylib.txt", "MYLIB2.TXT"]
-        )
-        item = config.schema["enabled_libraries"]
-        self.assertEqual(item["options"], ["phigros", "mylib", "MYLIB2"])
-        self.assertEqual(item["labels"], ["Phigros", "mylib", "MYLIB2"])
-
-    def test_plain_dict_config_is_harmless(self):
-        self.plugin._config = {"enabled_libraries": {}}
-        self.plugin._inject_library_options(["phigros.txt"])  # 不应抛异常
-
-    def test_empty_scan_does_not_touch_schema(self):
-        config = FakeConfig()
-        self.plugin._config = config
-        self.plugin._inject_library_options([])
-        self.assertEqual(config.schema["enabled_libraries"], {})
-
-
-# ---- schema 默认曲库与代码常量一致（防双处维护漂移） ----
+# ---- schema 固定选项与代码常量一致（防双处维护漂移） ----
 
 
 class SchemaDefaultsTests(unittest.TestCase):
-    def test_enabled_libraries_default_matches_code_constant(self):
+    def setUp(self):
         schema = json.loads(
             (REPO_ROOT / "_conf_schema.json").read_text(encoding="utf-8")
         )
+        self.item = schema["enabled_libraries"]
+
+    def test_enabled_libraries_default_matches_code_constant(self):
         self.assertEqual(
-            schema["enabled_libraries"]["default"],
+            self.item["default"],
             main.DEFAULT_ENABLED_LIBRARIES,
         )
 
+    def test_enabled_libraries_options_match_builtin_mapping(self):
+        self.assertEqual(self.item["options"], list(main.BUILTIN_LIBRARY_FILES))
 
-# ---- initialize 接线：扫描一次，注入与加载共用结果 ----
+    def test_enabled_libraries_labels_match_display_names(self):
+        self.assertEqual(
+            self.item["labels"],
+            [main.LIBRARY_DISPLAY_NAMES[stem] for stem in main.BUILTIN_LIBRARY_FILES],
+        )
+
+
+# ---- initialize 接线：直接加载固定内置映射 ----
 
 
 class InitializeWiringTests(SongLibraryTestCase):
-    def test_initialize_scans_injects_and_loads(self):
+    def test_initialize_loads_selected_builtin_library(self):
         self.write_default_libraries()
         self.plugin._config = {"enabled_libraries": ["phigros"]}
         asyncio.run(self.plugin.initialize())
-        self.assertEqual(
-            self.plugin._available_libraries,
-            [
-                "arcaea.txt",
-                "chunithm.txt",
-                "maimai.txt",
-                "musedash.txt",
-                "phigros.txt",
-            ],
-        )
         self.assertEqual(self.plugin.song_pool, _titles("PHI", 10))
         self.assertIsNone(self.plugin.song_load_error)
 
-    def test_initialize_removes_and_saves_missing_enabled_libraries(self):
+    def test_initialize_does_not_mutate_unknown_config_entries(self):
         self.write_library("phigros.txt", _titles("PHI", 10))
-        config = SavingFakeConfig(["phigros", "deleted_custom", "phigros"])
+        config = {"enabled_libraries": ["phigros", "deleted_custom"]}
         self.plugin._config = config
 
         asyncio.run(self.plugin.initialize())
 
-        self.assertEqual(config["enabled_libraries"], ["phigros", "phigros"])
-        self.assertEqual(config.save_count, 1)
+        self.assertEqual(
+            config["enabled_libraries"], ["phigros", "deleted_custom"]
+        )
         self.assertEqual(self.plugin.song_pool, _titles("PHI", 10))
-
-    def test_initialize_does_not_save_when_enabled_libraries_are_unchanged(self):
-        self.write_library("phigros.txt", _titles("PHI", 10))
-        config = SavingFakeConfig(["phigros"])
-        self.plugin._config = config
-
-        asyncio.run(self.plugin.initialize())
-
-        self.assertEqual(config["enabled_libraries"], ["phigros"])
-        self.assertEqual(config.save_count, 0)
-
-    def test_initialize_clears_all_enabled_libraries_when_files_are_missing(self):
-        config = SavingFakeConfig(["deleted_custom"])
-        self.plugin._config = config
-
-        asyncio.run(self.plugin.initialize())
-
-        self.assertEqual(config["enabled_libraries"], [])
-        self.assertEqual(config.save_count, 1)
 
 
 if __name__ == "__main__":

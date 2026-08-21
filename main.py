@@ -16,10 +16,8 @@ from astrbot.api.message_components import At, Plain
 from astrbot.api.star import Context, Star
 
 
-SONGS_DIR_NAME = "songs"
 GAME_SONG_COUNT = 8
-# 单个曲库文件大小上限：防止误放入超大自定义 txt 在初始化时阻塞事件循环、
-# 占用过多内存。内置最大曲库约 50KB，2MB 已留足余量。
+# 单个内置曲库文件大小上限：避免异常文件在初始化时占用过多资源。
 MAX_LIBRARY_FILE_BYTES = 2 * 1024 * 1024
 
 # QQ 官方客户端会把连续半角 * 按 Markdown 语法解释。
@@ -38,7 +36,26 @@ GUESS_PATTERN = re.compile(r"^(?:曲\s*)?([1-8])[\s.、]+(.+?)\s*$")
 # 默认启用的曲库（值为曲库文件名去掉 .txt 后缀）。
 DEFAULT_ENABLED_LIBRARIES = ["phigros", "arcaea", "musedash", "maimai"]
 
-# 已知音游曲库的官方显示名；未知 / 自定义曲库显示文件名。
+# 插件内置曲库的固定位置。不扫描 songs/，只有此处列出的文件会被识别。
+BUILTIN_LIBRARY_FILES = {
+    "phigros": "songs/phigros.txt",
+    "arcaea": "songs/arcaea.txt",
+    "musedash": "songs/musedash.txt",
+    "maimai": "songs/maimai.txt",
+    "cytus": "songs/cytus.txt",
+    "cytus2": "songs/cytus2.txt",
+    "deemo": "songs/deemo.txt",
+    "djmax": "songs/djmax.txt",
+    "lanota": "songs/lanota.txt",
+    "rotaeno": "songs/rotaeno.txt",
+    "chunithm": "songs/chunithm.txt",
+    "soundvoltex": "songs/soundvoltex.txt",
+    "pjsekai": "songs/pjsekai.txt",
+    "adofai": "songs/adofai.txt",
+    "beatsaber": "songs/beatsaber.txt",
+}
+
+# 内置音游曲库的官方显示名。
 LIBRARY_DISPLAY_NAMES = {
     "phigros": "Phigros",
     "arcaea": "Arcaea",
@@ -93,7 +110,7 @@ class AtBotFilter(filter.CustomFilter):
 
 
 # ---------------------------------------------------------------------------
-# 曲库加载：模块级纯函数（扫描 / 过滤 / 解析）
+# 曲库加载：模块级纯函数（过滤 / 解析）
 # ---------------------------------------------------------------------------
 
 
@@ -118,34 +135,6 @@ def _title_is_playable(title: str) -> bool:
     玩法才能成立；被过滤的标题本就无法有效开局。
     """
     return bool(_PLAYABLE_PATTERN.search(title))
-
-
-def _scan_library_files(songs_dir: Path) -> list[str]:
-    """扫描曲库目录，返回可用曲库文件名列表（按文件名排序）。
-
-    只识别直接子级的 .txt 常规文件，扩展名大小写不敏感（.TXT / .Txt
-    同样识别，兼容用户手动添加）；子目录不递归，非 txt 扩展名与
-    "." 开头隐藏文件忽略，避免误加载无关文件。目录不存在或列举
-    失败返回空列表，由调用方决定错误提示。
-    """
-    try:
-        entries = list(songs_dir.iterdir())
-    except OSError:
-        return []
-    names = [
-        entry.name
-        for entry in entries
-        if entry.is_file()
-        and not entry.name.startswith(".")
-        and entry.suffix.lower() == ".txt"
-        and entry.stem
-    ]
-    return sorted(names)
-
-
-def _library_stem(filename: str) -> str:
-    """曲库文件名（扩展名任意大小写）转曲库标识：去掉末尾的 .txt（4 个字符）。"""
-    return filename[: -len(".txt")]
 
 
 def _read_library_titles(path: Path) -> list[str] | None:
@@ -173,23 +162,12 @@ class MusicGuessPlugin(Star):
         self.exclusive_mode = (
             bool(config.get("exclusive_mode", False)) if config else False
         )
-        # 曲库启用配置（enabled_libraries）在 _load_songs 中按三态语义读取；
-        # 注入面板选项时需要访问 schema，因此保留引用。
+        # 曲库启用配置（enabled_libraries）在 _load_songs 中按三态语义读取。
         self._config = config
-        # initialize() 扫描得到的曲库文件名列表；面板选项注入与曲库加载共用这一份结果。
-        self._available_libraries: list[str] = []
 
     async def initialize(self):
-        """插件初始化：扫描曲库 → 清理失效配置 → 注入面板选项 → 加载曲库。
-
-        扫描只执行一次，配置选项与加载逻辑使用同一份结果；
-        曲库或目录的任何异常都不会阻止插件本身加载。
-        """
-        available = _scan_library_files(self._songs_dir())
-        self._available_libraries = available
-        await self._remove_missing_enabled_libraries(available)
-        self._inject_library_options(available)
-        self._load_songs(available)
+        """插件初始化：按固定的内置曲库路径加载歌曲。"""
+        self._load_songs()
 
     @filter.custom_filter(AtBotFilter)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
@@ -309,79 +287,15 @@ class MusicGuessPlugin(Star):
             )
         return "请 @机器人 后发送「开字母」开始一局。AstrBot 系统指令可使用 /help。"
 
-    # ---- 曲库目录与配置选项注入 ----
+    # ---- 曲库路径 ----
 
     @staticmethod
-    def _songs_dir() -> Path:
-        return Path(__file__).resolve().parent / SONGS_DIR_NAME
-
-    def _inject_library_options(self, library_files: list[str]) -> None:
-        """把扫描到的曲库写入配置 schema 的 options / labels，供 WebUI 复选框展示。
-
-        AstrBot v4.27.3 的 options 只能来自静态 _conf_schema.json，没有官方
-        动态生成机制；此处改写 AstrBotConfig 实例持有的 schema dict（WebUI
-        每次拉取配置读取同一引用），面板保存配置后 AstrBot 会热重载插件并
-        重新执行 initialize 注入。该行为依赖 AstrBot 内部实现，全部包裹在
-        try/except 中：失败仅记日志，面板退化为普通 list 手动填写，不影响
-        游戏功能。
-        """
-        config = self._config
-        if config is None or not library_files:
-            return
-        try:
-            schema = getattr(config, "schema", None)
-            item = schema.get("enabled_libraries") if isinstance(schema, dict) else None
-            if not isinstance(item, dict):
-                return
-            stems = [_library_stem(name) for name in library_files]
-            item["options"] = stems
-            item["labels"] = [
-                LIBRARY_DISPLAY_NAMES.get(stem, stem) for stem in stems
-            ]
-        except Exception:
-            logger.debug("music_guess 曲库配置选项注入失败，面板将显示为手动填写列表")
-
-    async def _remove_missing_enabled_libraries(
-        self, library_files: list[str]
-    ) -> None:
-        """从启用配置中移除已不存在的曲库，并写回插件配置文件。
-
-        仅处理合法的字符串列表，保留原有顺序和重复项；配置缺失或类型
-        非法时仍交给加载逻辑按原有三态语义处理。保存失败只记录日志，
-        不阻止插件继续使用清理后的内存配置完成初始化。
-        """
-        config = self._config
-        if config is None:
-            return
-        enabled = config.get("enabled_libraries")
-        if not isinstance(enabled, list) or not all(
-            isinstance(stem, str) for stem in enabled
-        ):
-            return
-
-        available_stems = {_library_stem(name) for name in library_files}
-        cleaned = [stem for stem in enabled if stem in available_stems]
-        if cleaned == enabled:
-            return
-
-        removed = [stem for stem in enabled if stem not in available_stems]
-        config["enabled_libraries"] = cleaned
-        try:
-            await config.save_config_async()
-        except Exception:
-            logger.exception(
-                "music_guess 清理不存在曲库的启用配置时保存失败："
-                + ", ".join(removed)
-            )
-        else:
-            logger.info(
-                "music_guess 已从启用配置中清除不存在的曲库："
-                + ", ".join(removed)
-            )
+    def _plugin_dir() -> Path:
+        return Path(__file__).resolve().parent
 
     # ---- 曲库加载 ----
 
-    def _load_songs(self, available_files: list[str]) -> None:
+    def _load_songs(self) -> None:
         """按用户配置合并启用曲库，构建歌曲池；对外只更新 song_pool / song_load_error。
 
         enabled_libraries 三态语义（不用 if not enabled 之类的合并判断）：
@@ -392,18 +306,7 @@ class MusicGuessPlugin(Star):
         曲库文件本身从不修改；跨曲库重复歌曲按答案匹配口径
         （_normalize_answer）在内存中去重，保留首次出现。
         """
-        songs_dir = self._songs_dir()
-        available_stems = [_library_stem(name) for name in available_files]
-        if not available_stems:
-            self.song_pool = []
-            if songs_dir.is_dir():
-                self.song_load_error = (
-                    f"曲库目录 {SONGS_DIR_NAME}/ 中没有可用的 txt 曲库文件。"
-                )
-            else:
-                self.song_load_error = f"曲库目录不存在：{SONGS_DIR_NAME}/"
-            logger.warning(self.song_load_error)
-            return
+        available_stems = list(BUILTIN_LIBRARY_FILES)
 
         enabled_cfg = (
             self._config.get("enabled_libraries")
@@ -429,12 +332,8 @@ class MusicGuessPlugin(Star):
             )
 
         enabled_set = set(enabled)
-        enabled_files = [
-            name
-            for name, stem in zip(available_files, available_stems)
-            if stem in enabled_set
-        ]
-        if not enabled_files:
+        enabled_stems = [stem for stem in available_stems if stem in enabled_set]
+        if not enabled_stems:
             self.song_pool = []
             display = "、".join(
                 LIBRARY_DISPLAY_NAMES.get(stem, stem) for stem in available_stems
@@ -450,11 +349,13 @@ class MusicGuessPlugin(Star):
         seen_keys: set[str] = set()
         duplicates = 0
         summaries: list[str] = []
-        for name in enabled_files:
-            titles = _read_library_titles(songs_dir / name)
+        plugin_dir = self._plugin_dir()
+        for stem in enabled_stems:
+            relative_path = BUILTIN_LIBRARY_FILES[stem]
+            titles = _read_library_titles(plugin_dir / relative_path)
             if titles is None:
                 logger.warning(
-                    f"music_guess 曲库 {name} 读取失败"
+                    f"music_guess 曲库 {relative_path} 读取失败"
                     "（不可读、非 UTF-8 或超过 2MB 大小上限），已跳过"
                 )
                 continue
@@ -468,10 +369,10 @@ class MusicGuessPlugin(Star):
                 pool.append(title)
                 kept += 1
             if kept:
-                summaries.append(f"{name}={kept}")
+                summaries.append(f"{relative_path}={kept}")
             else:
                 logger.warning(
-                    f"music_guess 曲库 {name} 没有可用曲目"
+                    f"music_guess 曲库 {relative_path} 没有可用曲目"
                     "（全部被过滤、为空或与其他曲库重复），已跳过"
                 )
 
