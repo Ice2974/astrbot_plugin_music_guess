@@ -6,6 +6,7 @@ from __future__ import annotations
 import random
 import re
 import unicodedata
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,7 +70,7 @@ class RoundSong:
 @dataclass(slots=True)
 class GameState:
     songs: list[RoundSong]
-    opened_chars: set[str] = field(default_factory=set)
+    opened_chars: dict[str, str] = field(default_factory=dict)
 
 
 class AtBotFilter(filter.CustomFilter):
@@ -490,9 +491,12 @@ class MusicGuessPlugin(Star):
         display_char = char.upper() if char.isalpha() else char
 
         if key in state.opened_chars:
-            return f"{display_char} 已经开过了。"
+            return (
+                f"{display_char} 已经开过了。\n\n"
+                f"{self._render_opened_chars(state)}"
+            )
 
-        state.opened_chars.add(key)
+        state.opened_chars[key] = display_char
 
         exists = any(
             any(
@@ -503,9 +507,15 @@ class MusicGuessPlugin(Star):
         )
 
         if not exists:
-            return f"本局没有 {display_char}。"
+            return (
+                f"本局没有 {display_char}。\n\n"
+                f"{self._render_opened_chars(state)}"
+            )
 
-        return f"已开启 {display_char}：\n\n{self._render_board(state)}"
+        return (
+            f"已开启 {display_char}：\n\n{self._render_board(state)}\n\n"
+            f"{self._render_opened_chars(state)}"
+        )
 
     def _guess_song(self, group_id: str, index: int, answer: str) -> str:
         state = self.games.get(group_id)
@@ -576,7 +586,7 @@ class MusicGuessPlugin(Star):
     def _is_openable_char(self, text: str) -> bool:
         return len(text) == 1 and self._is_secret_char(text)
 
-    def _mask_title(self, title: str, opened_chars: set[str]) -> str:
+    def _mask_title(self, title: str, opened_chars: Collection[str]) -> str:
         result: list[str] = []
 
         for ch in title:
@@ -602,6 +612,10 @@ class MusicGuessPlugin(Star):
             lines.append(f"{index}. {display}")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _render_opened_chars(state: GameState) -> str:
+        return "开字母历史：\n" + " ".join(state.opened_chars.values())
 
     @staticmethod
     def _render_answers(state: GameState) -> str:

@@ -246,6 +246,70 @@ class DispatchTests(unittest.TestCase):
         self.assertFalse(event.stopped)
         self.assertEqual(results, [])
 
+    def test_opened_characters_keep_first_open_order(self):
+        self._seed_game()
+
+        for char, expected in [("I", "I"), ("o", "I O"), ("A", "I O A")]:
+            with self.subTest(char=char):
+                reply = self.plugin._open_character("A", char)
+                self.assertTrue(
+                    reply.endswith(f"开字母历史：\n{expected}")
+                )
+                if char == "I":
+                    self.assertIn("1. ••••i••", reply)
+
+        state = self.plugin.games["A"]
+        self.assertEqual(
+            list(state.opened_chars.items()),
+            [("i", "I"), ("o", "O"), ("a", "A")],
+        )
+
+    def test_duplicate_open_is_not_recorded_twice(self):
+        self._seed_game()
+
+        self.plugin._open_character("A", "i")
+        reply = self.plugin._open_character("A", "I")
+
+        self.assertEqual(
+            reply,
+            "I 已经开过了。\n\n开字母历史：\nI",
+        )
+        self.assertEqual(list(self.plugin.games["A"].opened_chars.values()), ["I"])
+
+    def test_missing_character_is_recorded_and_displayed(self):
+        self._seed_game()
+
+        reply = self.plugin._open_character("A", "8")
+        duplicate_reply = self.plugin._open_character("A", "8")
+
+        self.assertEqual(reply, "本局没有 8。\n\n开字母历史：\n8")
+        self.assertEqual(
+            duplicate_reply,
+            "8 已经开过了。\n\n开字母历史：\n8",
+        )
+        self.assertEqual(list(self.plugin.games["A"].opened_chars.values()), ["8"])
+
+    def test_unicode_opened_character_is_displayed(self):
+        self._seed_game()
+
+        reply = self.plugin._open_character("A", "桜")
+
+        self.assertIn("3. ••桜", reply)
+        self.assertTrue(reply.endswith("开字母历史：\n桜"))
+
+    def test_opened_character_order_is_isolated_by_group(self):
+        self._seed_game("A")
+        self._seed_game("B")
+
+        self.plugin._open_character("A", "I")
+        self.plugin._open_character("A", "O")
+        self.plugin._open_character("B", "A")
+
+        self.assertEqual(
+            list(self.plugin.games["A"].opened_chars.values()), ["I", "O"]
+        )
+        self.assertEqual(list(self.plugin.games["B"].opened_chars.values()), ["A"])
+
     def test_public_game_all_guessed_auto_end(self):
         self._seed_game()
         for index, title in enumerate(GAME_TITLES, start=1):
