@@ -2,7 +2,7 @@ name: astrbot_plugin_music_guess
 display_name: 音游开字母
 desc: QQ 群多音游开字母猜曲小游戏，不依赖 LLM 或数据库，内置多音游曲库并支持 WebUI 勾选启用。
 short_desc: QQ 群多音游开字母猜曲小游戏。
-version: 0.6.2
+version: 0.6.3
 author: Ice2974
 repo: https://github.com/Ice2974/astrbot_plugin_music_guess
 astrbot_version: ">=4.27.3,<5"

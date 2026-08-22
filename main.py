@@ -4,22 +4,33 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import random
 import re
 import unicodedata
 from collections.abc import Collection
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import At, Plain
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context, Star, StarTools
 
 
 GAME_SONG_COUNT = 8
 # 单个内置曲库文件大小上限：避免异常文件在初始化时占用过多资源。
 MAX_LIBRARY_FILE_BYTES = 2 * 1024 * 1024
+
+# 进行中游戏局面的存档版本号；存档结构变化时递增，恢复时隔离旧版。
+STATE_FILE_VERSION = 1
+STATE_FILE_NAME = "games.json"
+# 存档大小上限（读、写双向强制）：读取时拒绝异常大文件；写入超过
+# 上限时保留磁盘上的旧快照，状态缩小后持久化自动恢复，避免写出
+# 下次启动自己又会拒绝恢复的文件。
+MAX_STATE_FILE_BYTES = 1 * 1024 * 1024
 
 # QQ 官方客户端会把连续半角 * 按 Markdown 语法解释。
 # 使用紧凑的 Bullet 字符 • 作为遮罩，既避开 Markdown，又能明显保留单词空格。
@@ -138,6 +149,16 @@ def _title_is_playable(title: str) -> bool:
     return bool(_PLAYABLE_PATTERN.search(title))
 
 
+def _is_encodable_text(text: str) -> bool:
+    """字符串能否无损 UTF-8 编码：JSON 可能解析出无法编码的孤立代理
+    字符，此类文本按非法数据处理，避免恢复后无法再次写出。"""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _read_library_titles(path: Path) -> list[str] | None:
     """读取单个曲库文件并过滤，返回适合玩法的曲名列表。
 
@@ -174,10 +195,23 @@ class MusicGuessPlugin(Star):
         self._holders: dict[str, object] = {}
         # 曲库启用配置（enabled_libraries）在 _load_songs 中按三态语义读取。
         self._config = config
+        # 游戏进度持久化目录，initialize 时经 StarTools 获取；不可用时
+        # 为 None，插件降级为纯内存模式，游戏功能不受影响。
+        self._data_dir: Path | None = None
 
     async def initialize(self):
-        """插件初始化：按固定的内置曲库路径加载歌曲。"""
+        """插件初始化：按固定的内置曲库路径加载歌曲，并恢复进行中的
+        游戏局面。数据目录不可用时降级为内存模式，不阻断曲库加载。"""
         self._load_songs()
+        try:
+            self._data_dir = StarTools.get_data_dir("astrbot_plugin_music_guess")
+        except (RuntimeError, ValueError) as e:
+            logger.warning(
+                f"music_guess 无法创建数据目录，本次运行不持久化游戏进度：{e!s}"
+            )
+            self._data_dir = None
+            return
+        self._restore_games()
 
     @filter.custom_filter(AtBotFilter)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
@@ -471,6 +505,239 @@ class MusicGuessPlugin(Star):
             + f"；跨曲库去重丢弃 {duplicates} 首，共 {len(pool)} 首"
         )
 
+    # ---- 游戏进度持久化 ----
+
+    @staticmethod
+    def _serialize_state(state: GameState) -> dict:
+        return {
+            "songs": [
+                {"title": song.title, "guessed": song.guessed}
+                for song in state.songs
+            ],
+            "opened_chars": dict(state.opened_chars),
+        }
+
+    def _persist_games(self) -> None:
+        """把全部进行中的游戏局面原子写入存档文件。
+
+        先序列化并检查大小，再写同目录临时文件后 os.replace 原子替换：
+        强杀落在临时文件写入期间时，旧存档仍保持完整。任何持久化异常
+        （序列化 / 编码 / IO / 超过大小上限）都只记 warning、不传出
+        调用方，游戏在内存中继续，后续状态变化会再次尝试。
+        """
+        if self._data_dir is None:
+            return
+        path = self._data_dir / STATE_FILE_NAME
+        tmp_path = path.with_name(STATE_FILE_NAME + ".tmp")
+        try:
+            payload = json.dumps(
+                {
+                    "version": STATE_FILE_VERSION,
+                    "games": {
+                        group_id: self._serialize_state(state)
+                        for group_id, state in self.games.items()
+                    },
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+            if len(payload) > MAX_STATE_FILE_BYTES:
+                logger.warning(
+                    f"music_guess 存档大小 {len(payload)} 字节超过上限 "
+                    f"{MAX_STATE_FILE_BYTES} 字节，超限状态不会更新到磁盘；"
+                    "重启可能回退到最后一次成功保存的局面，"
+                    "状态缩小后持久化自动恢复。"
+                )
+                return
+            tmp_path.write_bytes(payload)
+            os.replace(tmp_path, path)
+        except (TypeError, ValueError, OSError) as e:
+            logger.warning(
+                f"music_guess 游戏进度写入失败，本次状态未持久化：{e!s}"
+            )
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _restore_games(self) -> None:
+        """从存档文件恢复进行中的游戏局面；任何异常都不阻断插件加载。
+
+        - 文件不存在：空状态启动；
+        - 读取失败（权限等暂时性 IO 错误）：保留原文件不隔离，本次
+          运行降级为内存模式，避免误动可能完好的存档；
+        - 损坏（超限 / 非 UTF-8 / 解析失败 / 结构非法）或版本不受
+          支持：隔离原文件后从空状态启动，隔离失败同样降级为内存
+          模式、保留原文件不覆盖。
+        """
+        path = self._data_dir / STATE_FILE_NAME
+        try:
+            # 有界读取：无论文件多大，一次最多读入上限 + 1 字节。
+            with path.open("rb") as file:
+                payload = file.read(MAX_STATE_FILE_BYTES + 1)
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            logger.warning(
+                f"music_guess 存档读取失败，保留原文件，"
+                f"本次运行不持久化游戏进度：{e!s}"
+            )
+            self._data_dir = None
+            return
+
+        if len(payload) > MAX_STATE_FILE_BYTES:
+            logger.warning(
+                f"music_guess 存档超过大小上限 {MAX_STATE_FILE_BYTES} 字节，"
+                "按损坏隔离并从空状态启动"
+            )
+            self._quarantine_state_file(path, "corrupt")
+            return
+
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except (ValueError, RecursionError):
+            # UnicodeDecodeError / JSONDecodeError 均为 ValueError 子类；
+            # 超长整数触发 ValueError，过深嵌套触发 RecursionError，
+            # 统一按损坏隔离，不阻断插件加载。
+            logger.warning(
+                "music_guess 存档无法解析（非 UTF-8、非法 JSON、超长数字"
+                "或过深嵌套），按损坏隔离"
+            )
+            self._quarantine_state_file(path, "corrupt")
+            return
+
+        if not isinstance(data, dict):
+            logger.warning("music_guess 存档顶层结构非法，按损坏隔离")
+            self._quarantine_state_file(path, "corrupt")
+            return
+
+        version = data.get("version")
+        if type(version) is not int or version != STATE_FILE_VERSION:
+            # 未知版本不检查 games 结构（未来版本可能改变结构），
+            # 隔离保留原始数据，避免低版本运行时静默销毁高版本存档。
+            logger.warning(
+                f"music_guess 存档版本不受支持（{version!r}），"
+                "已隔离并从空状态启动"
+            )
+            self._quarantine_state_file(path, "unsupported", version)
+            return
+
+        raw_games = data.get("games")
+        if not isinstance(raw_games, dict):
+            logger.warning("music_guess 存档 games 结构非法，按损坏隔离")
+            self._quarantine_state_file(path, "corrupt")
+            return
+
+        restored: dict[str, GameState] = {}
+        dropped = 0
+        for group_id, raw_state in raw_games.items():
+            state = (
+                self._deserialize_state(raw_state)
+                if isinstance(group_id, str) and _is_encodable_text(group_id)
+                else None
+            )
+            if state is None:
+                dropped += 1
+                logger.warning(
+                    f"music_guess 存档中群 {group_id!r} 的局面结构非法，已丢弃"
+                )
+                continue
+            restored[group_id] = state
+
+        self.games = restored
+        logger.info(
+            f"music_guess 存档恢复完成：恢复 {len(restored)} 个群，"
+            f"丢弃 {dropped} 个群"
+        )
+        if dropped:
+            # 清洗写回：文件自愈，避免同一条目每次重载重复报警。
+            self._persist_games()
+
+    def _quarantine_state_file(
+        self, path: Path, kind: str, version: object = None
+    ) -> None:
+        """把无法恢复的存档移出原位置（损坏 / 版本不受支持）。
+
+        隔离失败（IO 错误）时本次运行降级为内存模式：不再写盘覆盖
+        原文件，保留待人工处理，插件仍以空状态正常启动。
+        """
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        if kind == "unsupported":
+            version_text = (
+                str(version)
+                if type(version) is int and 0 <= version <= 999_999
+                else "unknown"
+            )
+            name = f"games.unsupported-v{version_text}.{timestamp}.json"
+        else:
+            name = f"games.corrupt.{timestamp}.json"
+        try:
+            os.replace(path, path.with_name(name))
+            logger.warning(f"music_guess 无法恢复的存档已隔离为 {name}")
+        except OSError as e:
+            logger.warning(
+                f"music_guess 存档隔离失败（{e!s}），保留原文件，"
+                "本次运行不持久化游戏进度"
+            )
+            self._data_dir = None
+
+    def _deserialize_state(self, raw: object) -> GameState | None:
+        """校验单个群的存档条目并重建 GameState，结构非法返回 None。
+
+        曲目数量必须严格等于 GAME_SONG_COUNT：猜歌编号固定 1-8 并直接
+        索引 songs，不足会越界、超出则游戏无法结束。不校验曲目是否在
+        当前启用曲库：局面自带曲名，旧局继续不依赖 song_pool。
+        opened_chars 仅要求键为非空 casefold 形式字符串、值为非空字符
+        串：开字符的 casefold()/upper() 可能产生多码点或大小写不对称
+        的键值（如 ß -> "ss"/"SS"、ı -> "ı"/"I"），不做更强的假设。
+        """
+        if not isinstance(raw, dict):
+            return None
+        raw_songs = raw.get("songs")
+        if not isinstance(raw_songs, list) or len(raw_songs) != GAME_SONG_COUNT:
+            return None
+
+        songs: list[RoundSong] = []
+        seen_titles: set[str] = set()
+        for item in raw_songs:
+            if not isinstance(item, dict):
+                return None
+            title = item.get("title")
+            guessed = item.get("guessed")
+            if (
+                not isinstance(title, str)
+                or not title.strip()
+                or not _is_encodable_text(title)
+                or type(guessed) is not bool
+            ):
+                return None
+            answer_key = self._normalize_answer(title)
+            if answer_key in seen_titles:
+                return None
+            seen_titles.add(answer_key)
+            songs.append(RoundSong(title=title, guessed=guessed))
+
+        if all(song.guessed for song in songs):
+            return None
+
+        raw_opened = raw.get("opened_chars")
+        if not isinstance(raw_opened, dict):
+            return None
+        opened_chars: dict[str, str] = {}
+        for key, value in raw_opened.items():
+            if (
+                not isinstance(key, str)
+                or not key
+                or not isinstance(value, str)
+                or not value
+                or key != key.casefold()
+                or not _is_encodable_text(key)
+                or not _is_encodable_text(value)
+            ):
+                return None
+            opened_chars[key] = value
+
+        return GameState(songs=songs, opened_chars=opened_chars)
+
     def _start_game(self, group_id: str) -> str:
         if group_id in self.games:
             return "本群已经有一局开字母正在进行。"
@@ -487,6 +754,7 @@ class MusicGuessPlugin(Star):
         selected = random.sample(self.song_pool, GAME_SONG_COUNT)
         state = GameState(songs=[RoundSong(title=title) for title in selected])
         self.games[group_id] = state
+        self._persist_games()
 
         return (
             "开字母开始！\n\n"
@@ -515,6 +783,9 @@ class MusicGuessPlugin(Star):
             )
 
         state.opened_chars[key] = display_char
+        # 覆盖「本局有该字符」与「本局没有该字符」两种回复：开字符
+        # 历史均已更新，属于真实状态变化。
+        self._persist_games()
 
         exists = any(
             any(
@@ -552,9 +823,14 @@ class MusicGuessPlugin(Star):
 
         song.guessed = True
 
-        if all(item.guessed for item in state.songs):
+        # 终局（全部猜完删除本局）与继续两条路径在此汇合，统一持久化
+        # 一次，避免最后一首猜对时连续写盘两次。
+        finished = all(item.guessed for item in state.songs)
+        if finished:
             answers = self._render_answers(state)
             del self.games[group_id]
+        self._persist_games()
+        if finished:
             return (
                 f"答对了！\n\n{index}. ✓ {song.title}\n\n"
                 "全部歌曲都猜出来了，游戏结束！\n\n"
@@ -568,6 +844,7 @@ class MusicGuessPlugin(Star):
         if state is None:
             return "本群当前没有进行中的开字母游戏。"
 
+        self._persist_games()
         return f"本局结束，答案：\n\n{self._render_answers(state)}"
 
     @staticmethod
@@ -654,5 +931,10 @@ class MusicGuessPlugin(Star):
         )
 
     async def terminate(self):
-        """插件卸载/停用/重载时清理内存中的游戏状态。"""
+        """插件卸载/停用/重载前把游戏进度兜底落盘，再清理内存状态。
+
+        主要落盘时机是各状态变更点的即时持久化：面板进程重启等路径
+        不保证调用 terminate。
+        """
+        self._persist_games()
         self.games.clear()

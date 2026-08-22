@@ -84,6 +84,19 @@ def _install_astrbot_stubs() -> None:
         def __init__(self, context):
             self.context = context
 
+    class StarTools:
+        """get_data_dir 桩：默认未配置（抛 error，模拟数据目录不可用）；
+        正常路径由测试把 data_dir 注入为独立临时目录，不写仓库目录。"""
+
+        data_dir = None
+        error = RuntimeError
+
+        @classmethod
+        def get_data_dir(cls, plugin_name=None):
+            if cls.data_dir is None:
+                raise cls.error("stub: data dir not configured")
+            return cls.data_dir
+
     api.AstrBotConfig = dict
     api.logger = _Logger()
     event.AstrMessageEvent = object
@@ -98,6 +111,7 @@ def _install_astrbot_stubs() -> None:
     components.Plain = Plain
     star.Context = object
     star.Star = Star
+    star.StarTools = StarTools
     astrbot.api = api
     astrbot.api.event = event
     astrbot.api.event.filter = filter_mod
